@@ -1,0 +1,33 @@
+{
+  "outputStyle": "Cleo Concise",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .cleo/engine/hook.sh wakepack --ingest-missing --print",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .cleo/engine/hook.sh night --quick",
+            "timeout": 120
+          },
+          {
+            "type": "command",
+            "command": "bash .cleo/engine/backup_vault.sh --if-older-than 7",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}
