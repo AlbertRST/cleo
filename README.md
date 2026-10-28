@@ -30,7 +30,7 @@ content. `install-cleo.sh` copies it into any project as a new instance.
 Requires Python 3, git and [Claude Code](https://claude.com/claude-code).
 
 ```bash
-git clone <this repo> cleo && cd cleo
+git clone https://github.com/AlbertRST/cleo.git && cd cleo
 ./install-cleo.sh ~/path/to/project --name "Project Name"
 cd ~/path/to/project && claude        # Cleo wakes on her own
 ```
