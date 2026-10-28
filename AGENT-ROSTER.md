@@ -69,7 +69,7 @@ serve Cleo, never the partner directly: no agent owns a human-facing surface (ag
 dashboard for him) unless the partner explicitly asks for that surface. No agent keeps its own
 memory between tasks. An agent that stops earning its place is retired and archived, and any
 useful tool knowledge it had is kept as a reference note that Cleo hands to the right agent
-in a brief. Precedent: Zoe, an agenda assistant with her own memory, retired 2026-10-20 (HQ D13).
+in a brief. Precedent: an agenda assistant with her own memory was retired because it duplicated Cleo's own bookkeeping.
 
 ## Every agent file carries
 

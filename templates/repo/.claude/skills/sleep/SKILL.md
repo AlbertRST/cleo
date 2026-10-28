@@ -46,6 +46,9 @@ Resolve every `pending:<sid>` source left open during the session.
 - **Handoffs received** (the wake pack's `## INBOX`): once step 1 put what a handoff carried into
   this project's own memory, close it — `memctl handoff done <id> --note "<what was done>"`.
   Unfinished ones stay open; they reappear at the next wake.
+- **North-star delta:** did this session move a rung criterion (`.cleo/blueprint/NORTH-STAR.md`)?
+  One line in the session note, "no" included. At HQ, also update GOAL-STATE's
+  `North star: rung N — next gap: …` line.
 - **Regenerate `private/GOAL-STATE.md`** (≤40 lines, ≤3 KB): phase, commitments, open
   disagreements, do-not-do list, last thread. **Rewrite it — never append.**
 
@@ -133,7 +136,7 @@ improvement session.
 SLEEP CHECKLIST
  ✓ 0  ingest run (sid …)
  ✓ 1  boundary events reconciled: <n> new · <n> updated · <n> superseded · pending resolved · handoffs sent: <n>
- ✓ 2  session note: private/sessions/<file> · commitments/backlog · GOAL-STATE regenerated (<n> lines) · handoffs closed: <n>
+ ✓ 2  session note: private/sessions/<file> · north-star delta: <moved: … | no> · commitments/backlog · GOAL-STATE regenerated (<n> lines) · handoffs closed: <n>
  ✓ 3  MAP · DECISIONS (<entries or none>) · PARTNER-TASKS
  ✓ 4  audit: <id ok|drift, …> · lint: <errors/warnings> · situations.jsonl actual filled
  ✓ 4b drift: <none | no seed | refreshed n files | noted for HQ>

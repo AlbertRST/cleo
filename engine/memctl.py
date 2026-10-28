@@ -883,7 +883,7 @@ def _mask_harness(text: str) -> str:
 
 
 def user_turn_lines(records: list[dict]):
-    """Yield (md_line_no, text) for Alberto's own words only: text parts of non-meta user turns,
+    """Yield (md_line_no, text) for the partner's own words only: text parts of non-meta user turns,
     skipping assistant turns, tool_use, tool_result and harness-injected tags. Line numbers follow
     render_transcript exactly (header, body parts joined by newline, blank line)."""
     line = 2  # "# Transcript <sid>", ""

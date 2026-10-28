@@ -23,7 +23,7 @@ Done by `install-cleo.sh` the moment Cleo enters a project, and re-checked at ev
 | `.gitignore` | present, and covering the things every project commonly ignores: `venv/`, `.env*` (except `.env.example`), databases (`*.db`, `*.sqlite*`), `__pycache__/`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `*.log`, `.DS_Store`, editor junk, `.claude/settings.local.json`, `private/`, documents and media (`*.pdf`, `*.docx`, `*.xlsx`, images outside build inputs), and any tool-specific caches the project introduces. |
 | `README.md` | says what the project is, how to set it up, how to run it. Kept true. |
 
-## Git holds code and text only (Alberto, 2026-08-24; carried into doctrine 2026-09-07)
+## Git holds code and text only (the partner, 2026-08-24; carried into doctrine 2026-09-07)
 
 - **Never in a repo:** documents, scans, PDFs, office files, spreadsheets, databases, archives,
   media. They bloat history permanently, they are undiffable, and company documents carry

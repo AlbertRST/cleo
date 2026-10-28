@@ -18,7 +18,7 @@
 # --public is for repos that are (or will be) published, e.g. portfolio projects: all of Cleo's
 # machinery stays local-only. The bootstrap lives in .cleo/CLAUDE-BOOTSTRAP.md, imported by the
 # first line of CLAUDE.md; hooks go to .claude/settings.local.json; the rituals, the core roster
-# and ops/PARTNER-TASKS.md are gitignored too. A public clone sees only the project's docs.
+# and ops/PARTNER-TASKS.md + ops/AUTHORITY.md are gitignored too. A public clone sees only the project's docs.
 # Public is sticky: it is detected from CLAUDE.md's first line (committed, so it survives a clone)
 # and from .cleo/VERSION. To go back to private, remove the import line and the `visibility:` line,
 # then re-run. Converting a repo whose history already holds Cleo files prints a warning: untracking
@@ -229,6 +229,7 @@ else
 fi
 mkdir -p "$TARGET/ops"
 [ -f "$TARGET/ops/PARTNER-TASKS.md" ] || cp "$BLUEPRINT/templates/repo/ops/PARTNER-TASKS.md" "$TARGET/ops/"
+[ -f "$TARGET/ops/AUTHORITY.md" ] || cp "$BLUEPRINT/templates/repo/ops/AUTHORITY.md" "$TARGET/ops/"
 
 # Stamp the instance so a copy can always say what it is.
 python3 - "$BOOTFILE" "$NAME" "$TODAY" "$VERSION" <<'PY'
@@ -317,7 +318,7 @@ if [ -n "$(git -C "$TARGET" ls-files -- .cleo 2>/dev/null)" ]; then
 fi
 echo "  ✓ .cleo/ local-only (gitignored${UNTRACK_CLEO:+; untracked now, files kept on disk})"
 if [ "$VISIBILITY" = public ]; then
-  CLEO_PATHS=('.cleo/' '.claude/skills/wake/' '.claude/skills/sleep/' '.claude/output-styles/cleo-concise.md' 'ops/PARTNER-TASKS.md')
+  CLEO_PATHS=('.cleo/' '.claude/skills/wake/' '.claude/skills/sleep/' '.claude/output-styles/cleo-concise.md' 'ops/PARTNER-TASKS.md' 'ops/AUTHORITY.md')
   for a in "$BLUEPRINT"/templates/repo/.claude/agents/*.md; do CLEO_PATHS+=(".claude/agents/$(basename "$a")"); done
   for pat in "${CLEO_PATHS[@]}"; do
     grep -qxF -- "$pat" "$TARGET/.gitignore" || printf '%s\n' "$pat" >> "$TARGET/.gitignore"
@@ -499,7 +500,7 @@ chk "core agent roster installed"        "[ -f '$TARGET/.claude/agents/builder.m
 if [ "$VISIBILITY" = public ]; then
 chk "public: CLAUDE.md imports bootstrap" "first_line_is_import '$TARGET/CLAUDE.md'"
 chk "public: no inline bootstrap in CLAUDE.md" "! grep -q 'run /wake AUTOMATICALLY' '$TARGET/CLAUDE.md' && ! git -C '$TARGET' grep -q --cached -F 'run /wake AUTOMATICALLY' -- CLAUDE.md"
-chk "public: Cleo machinery untracked"   "[ -z \"\$(git -C '$TARGET' ls-files -- .cleo .claude/skills/wake .claude/skills/sleep .claude/settings.local.json .claude/output-styles/cleo-concise.md ops/PARTNER-TASKS.md \$(cd '$BLUEPRINT/templates/repo' && ls .claude/agents/*.md))\" ]"
+chk "public: Cleo machinery untracked"   "[ -z \"\$(git -C '$TARGET' ls-files -- .cleo .claude/skills/wake .claude/skills/sleep .claude/settings.local.json .claude/output-styles/cleo-concise.md ops/PARTNER-TASKS.md ops/AUTHORITY.md \$(cd '$BLUEPRINT/templates/repo' && ls .claude/agents/*.md))\" ]"
 chk "public: no Cleo hooks in the index"  "! git -C '$TARGET' grep -q --cached -F '.cleo/engine/hook.sh' -- .claude/settings.json"
 fi
 chk "beacon emitted"                     "[ -f \"\${CLEO_HOME:-$HOME/.cleo}/spokes/$ENCODED.json\" ]"

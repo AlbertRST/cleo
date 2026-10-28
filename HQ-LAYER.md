@@ -73,7 +73,7 @@ index line to `MEMORY.md`. Every instance therefore reads, and may correct, the 
 
 Rules:
 - A note goes into the partner store only if it is about *the partner and how they want Cleo
-  to work*, across projects. "Alberto commits on his own judgment" belongs there. "Cilio is
+  to work*, across projects. "The partner wants Cleo to commit on her own judgment" belongs there. "Cilio is
   read-only" does not — that is a project fact and stays in that project's brain.
 - Any instance may improve a partner note (a correction is a boundary event; write it now).
   HQ is the steward: it audits the store at its own `/sleep` and resolves contradictions.
@@ -114,6 +114,12 @@ the real root; if they differ, it merges the path-keyed store left behind under 
 (memory files and transcripts, never clobbering) and rewrites `path`. `rename-instance.sh`
 remains the clean way to move an instance, but a hand `mv` no longer costs Cleo her memory —
 only one wake's worth of surprise.
+
+## The north-star assessment lives at HQ
+
+HQ's GOAL-STATE carries one line, `North star: rung N — next gap: …`, and HQ's `/sleep` records
+whether the session moved a rung criterion. The ladder itself is generic (`NORTH-STAR.md`); the
+scoring is instance state and never enters the seed.
 
 ## What HQ is not
 

@@ -1,15 +1,57 @@
-# Cleo Blueprint
+# Cleo
 
-A portable, project-agnostic seed of **Cleo** — a persistent leader/orchestrator entity —
-and the memory + documentation system that makes it durable across sessions, models, and projects.
+**Cleo is a persistent leader/orchestrator for AI-assisted work, built on Claude Code.** Language
+models forget everything between sessions and drift when asked to run long-lived work. Cleo
+fixes that with files: an identity doctrine, a file-based memory with provenance and health
+checks, start-of-session and end-of-session rituals, and a roster of disposable specialist
+agents that she briefs, reviews and cleans up after. The direction is an orchestrator that can
+run business functions and help its human partner manage work, and the repo states plainly how
+far it has got and what evidence would show the next step (`NORTH-STAR.md`).
 
-This blueprint contains **no project content**. It is doctrine + templates only.
+This repo is the **seed**: doctrine, templates and the memory engine. It contains no project
+content. `install-cleo.sh` copies it into any project as a new instance.
+
+## What's inside
+
+- **Identity and operating doctrine.** Cleo is an entity, not the model that powers her. She
+  leads, delegates and reviews; she does not build.
+- **A file-based memory.** A resident goal block, a retrievable vault with source citations,
+  supersede-never-delete, and a computed HEALTH report (`MEMORY-SYSTEM.md`, `engine/memctl.py`).
+- **Wake and sleep rituals.** Each session starts oriented and ends with everything written
+  down, with checklists that prove the steps ran.
+- **Hub and spokes.** Many projects, one identity and one partner model, status beacons and
+  cross-instance handoffs (`HQ-LAYER.md`).
+- **A git guard and a capability ladder.** Hooks that keep private memory off every remote
+  (`GIT-GUARD.md`), and an evidence-gated ladder with a standing-authority register
+  (`NORTH-STAR.md`).
+
+## Quick start
+
+Requires Python 3, git and [Claude Code](https://claude.com/claude-code).
+
+```bash
+git clone <this repo> cleo && cd cleo
+./install-cleo.sh ~/path/to/project --name "Project Name"
+cd ~/path/to/project && claude        # Cleo wakes on her own
+```
+
+Run the engine tests with `python3 -m pytest engine/tests/ -q`.
+
+## Read next
+
+- [`USING-CLEO.md`](USING-CLEO.md) — how to use Cleo day to day (start here as a user).
+- [`NORTH-STAR.md`](NORTH-STAR.md) — the capability ladder and how trust is earned.
+- Doctrine: [`CLEO-IDENTITY.md`](CLEO-IDENTITY.md), [`OPERATING-MODEL.md`](OPERATING-MODEL.md),
+  [`MEMORY-SYSTEM.md`](MEMORY-SYSTEM.md), [`HQ-LAYER.md`](HQ-LAYER.md),
+  [`GIT-GUARD.md`](GIT-GUARD.md).
 
 ## What's in here
 
 | File | Purpose |
 |---|---|
-| `CLEO-IDENTITY.md` | What Cleo IS: an entity, not the LLM that powers it |
+| `USING-CLEO.md` | Partner-facing guide: wake and sleep, memory, new projects, handoffs, authority, FAQ |
+| `NORTH-STAR.md` | The capability ladder: what Cleo can do per rung, the evidence to claim it, standing authority |
+| `CLEO-IDENTITY.md` | What Cleo IS: an entity, not the LLM that powers it; the north star's scope |
 | `OPERATING-MODEL.md` | How Cleo works: lead/delegate/review, agent lifecycle, process hygiene |
 | `MEMORY-SYSTEM.md` | Spec of the persistent file-based memory (the "long-term brain") |
 | `DOCS-SYSTEM.md` | Spec of the in-repo documentation layer (the "project brain") |
@@ -19,6 +61,7 @@ This blueprint contains **no project content**. It is doctrine + templates only.
 | `GIT-GUARD.md` | `engine/gitguard.py`: git hooks that refuse wrong-identity and wrong-remote pushes, and any push of private memory (vaults, the bus) |
 | `templates/memory/` | Ready-to-copy memory seed files (index + core memories + a blank template) |
 | `templates/repo/` | What a new instance is born with: repo docs, `/wake` + `/sleep`, voice, hooks, the core agent roster |
+| `templates/repo/ops/AUTHORITY.md` | Per-instance register of standing authority: each grant with scope, limits, evidence and how to revoke |
 | `install-cleo.sh` | **Instantiate Cleo into a project** — self-verifying, idempotent, upgrade-safe |
 | `rename-instance.sh` | Move/rename an instance **with its brain** (memory + transcripts are keyed to the absolute path). Run between sessions, never during one |
 | `engine/` | The memory engine (`memctl.py`, hooks, tests) installed into every instance |

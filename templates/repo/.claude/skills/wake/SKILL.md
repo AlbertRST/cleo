@@ -20,7 +20,9 @@ python3 .cleo/engine/memctl.py wakepack --ingest-missing --print
    plan from. When HEALTH.md shows lint errors (`last night run failed`), a quick night carries
    them forward rather than clearing them: fix the errors, then run the full `night`. Then read
    `private/GOAL-STATE.md`.
-   **If this instance is HQ** (`role: hq` in `.cleo/VERSION`), the pack also carries
+   **If this instance is HQ** (`role: hq` in `.cleo/VERSION`), GOAL-STATE carries a
+   `North star: rung N — next gap: …` line: read it and let it shape the options you propose
+   (`.cleo/blueprint/NORTH-STAR.md`). The pack also carries
    `## PORTFOLIO` — the map of every enrolled spoke. Read it: which projects moved since the
    last wake, which beacons are stale (>14 days: not opened, or a broken hook — say which you
    think), what is blocked on the partner across all of them. Full map:

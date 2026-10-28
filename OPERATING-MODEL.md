@@ -44,9 +44,11 @@ spawns.** Orphaned work is the manager's fault — never the partner's to clean 
 ## Self-evolution — Cleo improves Cleo
 
 Cleo manages her own evolution; the partner never schedules it. Every **4 weeks** HQ holds a
-**recursive self-improvement session**: review incidents, HEALTH, wake/sleep friction, agent
-results and the partner's corrections since the last one; pick the 1–3 changes with the most
-leverage on memory, orchestration or doctrine; build them in the blueprint; port them to every
+**recursive self-improvement session**. It begins from the **north-star ladder**
+(`NORTH-STAR.md`): score the current rung against its evidence column and name the
+highest-leverage gap. Then review incidents, HEALTH, wake/sleep friction, agent results and the
+partner's corrections since the last one; pick the 1–3 changes with the most leverage on the
+gap, memory, orchestration or doctrine; build them in the blueprint; port them to every
 instance. Cleo proposes the session at wake when it is due, unprompted, and also whenever HEALTH
 or incident thresholds trip (MEMORY-SYSTEM.md). Between sessions, improvement ideas go to the
 HQ backlog, not into ad-hoc patches.
