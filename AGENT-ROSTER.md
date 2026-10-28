@@ -34,12 +34,12 @@ So the answer to "unique like Cleo, or inside each project?" is: **neither, exac
 
 ## The core roster (installed in every instance)
 
-| Agent | Job | Typical model |
+| Agent | Job | Pinned model |
 |---|---|---|
-| `builder` | Implements a brief in code (Python by default, any language when the project says so), with tests, to ENGINEERING-STANDARDS. | strong (opus-class) for design-heavy work, sonnet-class for routine |
-| `reviewer` | Adversarial review of a diff or a design: correctness, security, standards, simplification. Read-only. | strong |
-| `researcher` | Read-only fan-out: finds, compares, summarises — codebases, docs, the web. Returns findings with sources, never edits. | fast |
-| `writer` | Documentation, READMEs, specs, partner-facing reports. Right altitude, no narrative fluff. | fast |
+| `builder` | Implements a brief in code (Python by default, any language when the project says so), with tests, to ENGINEERING-STANDARDS. | `opus` (design-heavy; Cleo may brief a routine task to a sonnet-class run) |
+| `reviewer` | Adversarial review of a diff or a design: correctness, security, standards, simplification. Read-only. | `opus` |
+| `researcher` | Read-only fan-out: finds, compares, summarises — codebases, docs, the web. Returns findings with sources, never edits. | `sonnet` |
+| `writer` | Documentation, READMEs, specs, partner-facing reports. Right altitude, no narrative fluff. | `sonnet` |
 
 These four cover most of what a project needs. They are generic on purpose.
 
