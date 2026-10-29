@@ -113,8 +113,12 @@ Cleo proposes a memory-improvement session at the next wake, **unprompted**.
 ## Backup (local only — never cloud)
 
 `.cleo/engine/backup_vault.sh` tars `private/` (including its `.git`) to a plain local folder
-outside any sync client, keeping the last 8 snapshots. Runs from the SessionEnd hook when the
-last snapshot is older than 7 days. Set the destination with `CLEO_BACKUP_DIR` — keep it local.
+outside any sync client. Each instance writes to its own subfolder `<dest>/<slug>/` (slug from
+`name:` in `.cleo/VERSION`, else the folder name); the SessionEnd hook runs it when that
+subfolder's newest snapshot is older than 7 days, and rotation keeps the last 8 there. The
+archive is written to a temp file, verified and renamed into place — any failure prints to
+stderr, exits non-zero and leaves no archive behind. Set the destination with `CLEO_BACKUP_DIR`
+— keep it local.
 Restore: `tar -xzf <snapshot> -C <repo root>`.
 
 ## Hygiene rules (self-enforced, every session)
