@@ -3,8 +3,8 @@
 
 Single-file CLI. Python 3.12, stdlib + PyYAML. See subprojects/memory/README.md.
 
-Subcommands: ingest, catalog, query, cues, lint, audit, incidents, wakepack, night, health,
-beacon, portfolio, relocate, partner, drift, handoff (hub-and-spoke layer).
+Subcommands: ingest, catalog, query, cues, lint, audit, incidents, wakepack, unslept, night,
+health, beacon, portfolio, relocate, partner, drift, handoff (hub-and-spoke layer).
 """
 from __future__ import annotations
 
@@ -113,6 +113,18 @@ STAMP_RE = re.compile(r"[ \t]*<!-- CLEO-INSTANCE:.*?-->[ \t]*\n?", re.S)
 SLUG_RE = re.compile(r"[^a-z0-9]+")
 INBOX_PACK_CAP = WAKE_PACK_CAP // 6
 INBOX_TRUNC_LINE = "(more — run `memctl handoff list --print`)"
+# unslept sessions: a chat that ended without /sleep has no episode citing its sid
+UNSLEPT_DAYS = 14
+UNSLEPT_MIN_TURNS = 2
+UNSLEPT_PACK_LIST = 3
+UNSLEPT_GRACE_MIN = 30  # a goodbye typed just after /sleep wrote the episode does not re-open it
+# user records the partner did not type: harness notices, local command output, interruptions
+NOT_TYPED_PREFIXES = ("<task-notification>", "<local-command-stdout>", "<local-command-stderr>",
+                      "[Request interrupted")
+# vault backups: backup_vault.sh writes $CLEO_BACKUP_DIR/<slug>/vault-*.tar.gz (keep the two in sync)
+BACKUP_DEFAULT_DIR = "/mnt/c/CleoBackups/vault"
+BACKUP_STALE_DAYS = 10
+BACKUP_MIN_BYTES = 1024  # smaller is not a snapshot: the old bug wrote 45-byte empty archives
 
 
 # --------------------------------------------------------------------------- helpers
@@ -999,14 +1011,178 @@ def health_line(ctx: Ctx, exclude_sid: str | None = None) -> str:
     return f"HEALTH: {status} (night run {hts}, newest transcript {src.stem} {mtime})"
 
 
+def _parse_ts(value) -> dt.datetime | None:
+    """A transcript `timestamp` (ISO, UTC 'Z') as an aware datetime; None when unparseable."""
+    try:
+        stamp = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=dt.timezone.utc)
+
+
+def _is_typed(text) -> bool:
+    text = str(text).strip()
+    return bool(text) and not text.startswith(NOT_TYPED_PREFIXES)
+
+
+def _is_genuine_user_turn(rec: dict) -> bool:
+    """The partner typed something: a user record with typed text. Meta, compact-summary and
+    sidechain records, tool results and harness/local-command text do not count; a /wake does."""
+    if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isCompactSummary") or rec.get("isSidechain"):
+        return False
+    content = (rec.get("message") or {}).get("content", "")
+    if isinstance(content, str):
+        return _is_typed(content)
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "text" and _is_typed(b.get("text", "")) for b in content)
+
+
+def genuine_user_turns(path: Path) -> tuple[int, dt.datetime | None]:
+    """(count, last timestamp) of a transcript's genuine user turns. Streams the file (transcripts
+    reach megabytes) and skips unparseable lines; turns without a usable timestamp are not counted."""
+    count, last = 0, None
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if '"user"' not in line:  # cheap pre-filter: most lines are assistant/tool records
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and _is_genuine_user_turn(rec) and (stamp := _parse_ts(rec.get("timestamp"))):
+                count += 1
+                last = stamp if last is None else max(last, stamp)
+    return count, last
+
+
+def _cites(text: str, sid: str) -> bool:
+    """An episode cites a session by `raw:<sid8>`, `pending:<sid8>` or the full sid — never by a bare
+    8-char fragment, which can occur by chance."""
+    return sid in text or f"raw:{sid[:8]}" in text or f"pending:{sid[:8]}" in text
+
+
+def unslept_sessions(ctx: Ctx, exclude_sid: str | None = None, days: int = UNSLEPT_DAYS) -> list[dict]:
+    """Recent sessions that ended without /sleep, newest first. Slept = some episode (sessions/,
+    checkins/) cites the sid (`_cites`) AND was written no more than UNSLEPT_GRACE_MIN before the
+    session's last genuine user turn. Recency is that turn's timestamp, not the file mtime (only a
+    pre-filter): the app touches old transcripts with metadata lines. Sessions with fewer than
+    UNSLEPT_MIN_TURNS genuine turns are ignored; unreadable files are skipped."""
+    cutoff = dt.datetime.combine(today() - dt.timedelta(days=days), dt.time()).timestamp()
+    sources: dict[str, Path] = {}
+    seen: set[str] = set()
+    for d in (ctx.transcripts, ctx.raw):  # Claude Code's dir first, the vault's copies once pruned
+        for p in sorted(d.glob("*.jsonl")) if d.is_dir() else []:
+            if p.stem in seen:  # seen before the window test: a fresh raw copy never stands in
+                continue
+            seen.add(p.stem)
+            try:
+                recent = p.stat().st_mtime >= cutoff
+            except OSError:
+                continue
+            if recent and p.stem != exclude_sid:
+                sources[p.stem] = p
+    episodes = []
+    for p in (q for sub in ("sessions", "checkins") for q in sorted((ctx.vault / sub).glob("*.md"))):
+        try:
+            episodes.append((p.stat().st_mtime, p.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            continue
+    grace = UNSLEPT_GRACE_MIN * 60
+    found = []
+    for sid, path in sources.items():
+        try:
+            turns, last = genuine_user_turns(path)
+        except OSError:
+            continue
+        if turns < UNSLEPT_MIN_TURNS or last.timestamp() < cutoff:
+            continue
+        noted = [mtime for mtime, text in episodes if _cites(text, sid)]
+        if noted and max(noted) + grace >= last.timestamp():
+            continue
+        found.append({"sid": sid, "last_turn": last.isoformat().replace("+00:00", "Z"),
+                      "reason": "turns after its session note" if noted else "no session note"})
+    return sorted(found, key=lambda r: r["last_turn"], reverse=True)
+
+
+def _local_minute(iso: str) -> str:
+    return _parse_ts(iso).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def unslept_entry(row: dict) -> str:
+    return f"{row['sid'][:8]} (last turn {_local_minute(row['last_turn'])}, {row['reason']})"
+
+
+def unslept_line(ctx: Ctx, exclude_sid: str | None = None) -> str | None:
+    """The wake-pack line: only when a recent session was never consolidated."""
+    rows = unslept_sessions(ctx, exclude_sid)
+    if not rows:
+        return None
+    shown = "; ".join(unslept_entry(r) for r in rows[:UNSLEPT_PACK_LIST])
+    more = len(rows) - UNSLEPT_PACK_LIST
+    return f"UNSLEPT: {shown}" + (f"; +{more} more" if more > 0 else "")
+
+
+def cmd_unslept(ctx: Ctx, do_print: bool = False, exclude_sid: str | None = None) -> list[dict]:
+    rows = unslept_sessions(ctx, exclude_sid)
+    print(f"unslept: {len(rows)} session(s) in the last {UNSLEPT_DAYS} days" if rows else "unslept: none")
+    if do_print:
+        for r in rows:
+            print(f"  {r['sid']} — last turn {_local_minute(r['last_turn'])}, {r['reason']}")
+    return rows
+
+
+def backup_dir(ctx: Ctx) -> tuple[Path, str]:
+    """(DEST, slug) exactly as backup_vault.sh resolves them. Contract shared with the script: the
+    FIRST unindented `name:` line of .cleo/VERSION (its sed | head -1), else the folder name;
+    lowercase, runs of non-[a-z0-9] -> '-', trimmed. The folder name comes from the resolved root,
+    the script's from `pwd` (logical path): the two differ only under a symlinked instance dir."""
+    dest = Path(os.environ.get("CLEO_BACKUP_DIR") or BACKUP_DEFAULT_DIR)
+    version = ctx.root / ".cleo" / "VERSION"
+    lines = version.read_text(encoding="utf-8").splitlines() if version.is_file() else []
+    name = next((line[len("name:"):] for line in lines if line.startswith("name:")), "")
+    name = SLUG_RE.sub("-", name.lower()).strip("-")
+    return dest, name or SLUG_RE.sub("-", ctx.root.name.lower()).strip("-")
+
+
+def backup_status(ctx: Ctx) -> dict:
+    """Newest real vault snapshot of this instance: state ok | stale | none | unreachable."""
+    dest, name = backup_dir(ctx)
+    if not dest.is_dir():
+        return {"newest": None, "age_days": None, "state": "unreachable"}
+    sub = dest / name
+    stamps = [st.st_mtime for p in (sub.glob("vault-*.tar.gz") if sub.is_dir() else [])
+              if (st := p.stat()).st_size >= BACKUP_MIN_BYTES]
+    if not stamps:
+        return {"newest": None, "age_days": None, "state": "none"}
+    newest = dt.datetime.fromtimestamp(max(stamps)).replace(microsecond=0)
+    age = max(0, (today() - newest.date()).days)
+    return {"newest": newest.isoformat(), "age_days": age, "state": "stale" if age > BACKUP_STALE_DAYS else "ok"}
+
+
+def backup_line(ctx: Ctx) -> str | None:
+    """The wake-pack line: silent while the newest snapshot is fresh."""
+    status = backup_status(ctx)
+    dest, name = backup_dir(ctx)
+    if status["state"] == "ok":
+        return None
+    if status["state"] == "stale":
+        return (f"BACKUP: STALE — newest {name} snapshot {status['age_days']} days old "
+                f"({status['newest'][:10]})")
+    if status["state"] == "none":
+        return f"BACKUP: none — no {name} snapshot of at least {BACKUP_MIN_BYTES} bytes in {dest / name}"
+    return f"BACKUP: unreachable — {dest} does not exist"
+
+
 def build_wakepack(ctx: Ctx, exclude_sid: str | None = None) -> str:
     top = [health_line(ctx, exclude_sid)]
-    try:
-        line = drift_line(ctx)
-        if line:
-            top.append(line)
-    except Exception as exc:  # the drift check is a bonus; never block a wake on it
-        _log_hook_error(ctx, "drift", exc)
+    for label, fn in (("drift", lambda: drift_line(ctx)), ("unslept", lambda: unslept_line(ctx, exclude_sid)),
+                      ("backup", lambda: backup_line(ctx))):
+        try:
+            line = fn()
+            if line:
+                top.append(line)
+        except Exception as exc:  # these checks are a bonus; never block a wake on them
+            _log_hook_error(ctx, label, exc)
     sections: list[list[str]] = [top]
     goal = ctx.vault / "GOAL-STATE.md"
     if goal.exists():
@@ -1210,6 +1386,7 @@ def build_beacon(ctx: Ctx) -> dict:
     parsed = parse_goal_state(goal.read_text(encoding="utf-8")) if goal.exists() else parse_goal_state("")
     health = ctx.index / "HEALTH.md"
     health_first = health.read_text(encoding="utf-8").splitlines()[:1] if health.exists() else []
+    backup = _beacon_count(ctx, "backup", lambda: backup_status(ctx)) or {}
     return {
         "name": ver.get("name") or ctx.root.name,
         "path": str(ctx.root),
@@ -1224,6 +1401,8 @@ def build_beacon(ctx: Ctx) -> dict:
         "partner_tasks_open": count_open_partner_tasks(ctx.root / "ops" / "PARTNER-TASKS.md"),
         "handoffs_open": _beacon_count(ctx, "inbox", lambda: len(inbox(ctx))),
         "drift": _beacon_count(ctx, "drift", lambda: drift_count(ctx)),
+        "backup_age_days": backup.get("age_days"),
+        "backup_state": backup.get("state"),
         "last_session": last_session_date(ctx),
         "seed": str(seed) if ver.get("role") == "hq" and (seed := local_seed(ctx.root)) else None,
         "updated": now_iso(),
@@ -1267,6 +1446,15 @@ def beacon_age_days(beacon: dict, ref: dt.date) -> int | None:
     return None if upd is None else max(0, (ref - upd).days)
 
 
+def backup_cell(beacon: dict) -> str:
+    """Portfolio cell for a beacon's backup: age when there is a snapshot, the state when there is
+    none; — when unknown (an older engine, or the check failed)."""
+    state, age = beacon.get("backup_state"), beacon.get("backup_age_days")
+    if state in ("ok", "stale") and isinstance(age, int):
+        return f"{age}d ⚠" if state == "stale" else f"{age}d"
+    return {"none": "none ⚠", "unreachable": "unreachable"}.get(state, "—")
+
+
 def render_portfolio(ctx: Ctx, beacons: list[dict], bad: list[str]) -> str:
     ref = today()
     here = str(ctx.root)
@@ -1291,12 +1479,13 @@ def render_portfolio(ctx: Ctx, beacons: list[dict], bad: list[str]) -> str:
             return n + " (this)" if b.get("path") == here else n
 
         if active:
-            lines += ["", "| Name | Phase | Health | Last session | Open partner tasks | Open handoffs | Drift | Beacon age |",
-                      "|---|---|---|---|---|---|---|---|"]
+            lines += ["", "| Name | Phase | Health | Last session | Open partner tasks | Open handoffs | Drift | Backup | Beacon age |",
+                      "|---|---|---|---|---|---|---|---|---|"]
             for b, age in active:
                 counts = ["—" if b.get(k) is None else str(b[k]) for k in ("handoffs_open", "drift")]  # null/absent: unknown
                 cells = [name_of(b), str(b.get("phase") or "—"), str(b.get("health") or "unknown"),
-                         str(b.get("last_session") or "—"), str(b.get("partner_tasks_open", 0)), *counts, f"{age}d"]
+                         str(b.get("last_session") or "—"), str(b.get("partner_tasks_open", 0)), *counts,
+                         backup_cell(b), f"{age}d"]
                 lines.append("| " + " | ".join(c.replace("|", "\\|").replace("\n", " ") for c in cells) + " |")
             lines += ["", "## Last threads"]
             for b, _ in active:
@@ -1886,6 +2075,8 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("audit"); a.add_argument("--pick", type=int); a.add_argument("--verdict", nargs="+", metavar=("ID", "STATUS"))
     i = sub.add_parser("incidents"); i.add_argument("--sid")
     w = sub.add_parser("wakepack"); w.add_argument("--ingest-missing", action="store_true"); w.add_argument("--print", action="store_true"); w.add_argument("--exclude-sid")
+    u = sub.add_parser("unslept", help="recent sessions that ended without /sleep")
+    u.add_argument("--print", action="store_true", help="also list the sessions"); u.add_argument("--exclude-sid")
     n = sub.add_parser("night"); n.add_argument("--quick", action="store_true"); n.add_argument("--no-commit", action="store_true")
     sub.add_parser("health")
     b = sub.add_parser("beacon"); b.add_argument("--print", action="store_true")
@@ -1927,6 +2118,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_incidents(ctx, args.sid); return 0
     if args.cmd == "wakepack":
         cmd_wakepack(ctx, args.ingest_missing, args.print, args.exclude_sid); return 0
+    if args.cmd == "unslept":
+        cmd_unslept(ctx, args.print, args.exclude_sid); return 0
     if args.cmd == "night":
         return cmd_night(ctx, args.quick, args.no_commit)
     if args.cmd == "health":

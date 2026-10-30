@@ -88,7 +88,9 @@ Derived fields (id, links, access signals, tier, frontmatter snapshot) live in
 - `SessionStart` hook → `memctl wakepack --ingest-missing --print`: ingests anything un-captured
   — or, when the last session left the brain stale (no `night` ran after it), runs the quick
   night it missed — then injects WAKE-PACK (≤9,000 chars: HEALTH line, a DRIFT line if the
-  instance lags its seed, GOAL-STATE, INBOX of handoffs, cues due, hot index, last episode).
+  instance lags its seed, an UNSLEPT line if a recent session ended without `/sleep` (no episode
+  written after its last turn), a BACKUP line if the vault snapshot is stale (>10 days), missing
+  or unreachable, GOAL-STATE, INBOX of handoffs, cues due, hot index, last episode).
 - `/wake` (Cleo) = interpret the pack, infer the situation, retrieve against it, report, propose.
 - `SessionEnd` hook → `memctl night --quick`: capture, rebuild catalog, write HEALTH, build
   WAKE-PACK, commit the vault. **Runs even if `/sleep` never ran** — the safety net.

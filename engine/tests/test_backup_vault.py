@@ -146,3 +146,18 @@ def test_waits_for_night_lock_then_backs_up(tmp_path, monkeypatch):
     free = backup(root, dest)
     assert free.returncode == 0, free.stderr
     assert len(snapshots(dest / "acme-hq")) == 1
+
+
+def test_sweeps_stray_temp_files_older_than_a_day(tmp_path):
+    """A SIGKILLed run leaves its .vault-* temp file; the next run removes it, even when the gate skips."""
+    root, dest = instance(tmp_path), tmp_path / "backups"
+    sub = dest / "acme-hq"
+    fake_snapshots(sub, 1, age_days=0)
+    stray, live = sub / ".vault-2020-01-01_0000.AAAAAA", sub / ".vault-2020-01-02_0000.BBBBBB"
+    for path, age in ((stray, 2 * DAY), (live, 60)):
+        path.write_bytes(b"partial")
+        os.utime(path, (time.time() - age, time.time() - age))
+    proc = backup(root, dest, "--if-older-than", "7")
+    assert proc.returncode == 0, proc.stderr
+    assert "skipped" in proc.stdout
+    assert not stray.exists() and live.exists()

@@ -1,4 +1,5 @@
 """memctl tests on synthetic fixtures only (never touches private/)."""
+import datetime as dt
 import fcntl
 import importlib.util
 import json
@@ -54,6 +55,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("CLEO_HOME", raising=False)
     monkeypatch.setenv("MEMCTL_TODAY", TODAY)
     monkeypatch.setenv("MEMCTL_NOW", TODAY + "T01:00:00")
+    monkeypatch.setenv("CLEO_BACKUP_DIR", str(tmp_path / "backups"))  # never the real backup folder
     root = tmp_path / "repo"
     root.mkdir()
     (root / "MISSION.md").write_text("# Mission\n")
@@ -512,11 +514,11 @@ def test_portfolio_render_sort_stale_and_empty(env):
     assert "No spokes are enrolled" in text and "install-cleo.sh" in text
     assert (ctx.index / "PORTFOLIO.md").read_text() == text
     beacon_file("Older", "/x/older", "2026-08-21T22:00:00", partner_tasks_open=3, last_session="2026-08-19",
-                handoffs_open=2, drift=0)
+                handoffs_open=2, drift=0, backup_age_days=12, backup_state="stale")
     beacon_file("Repo Name", str(ctx.root), TODAY + "T01:00:00")
     beacon_file("Sleeper", "/x/sleeper", "2026-08-01T00:00:00", status="dormant")
     beacon_file("Ghost", "/x/ghost", "2026-08-08T12:00:00")  # 15 days old -> stale
-    beacon_file("Edge", "/x/edge", "2026-08-09T12:00:00")  # exactly 14 days -> still active
+    beacon_file("Edge", "/x/edge", "2026-08-09T12:00:00", backup_age_days=3, backup_state="ok")  # exactly 14 days -> still active
     bad = memctl.bus_root() / "spokes" / "broken.json"
     bad.write_text("{not json")
     text = memctl.cmd_portfolio(ctx)
@@ -524,10 +526,11 @@ def test_portfolio_render_sort_stale_and_empty(env):
     assert lines[0] == "# PORTFOLIO — 3 active · 1 dormant · 1 stale"
     rows = [l for l in lines if l.startswith("| ") and not l.startswith("| Name")]
     assert [r.split(" | ")[0][2:] for r in rows] == ["Repo Name (this)", "Older", "Edge"]
-    assert "| Open partner tasks | Open handoffs | Drift | Beacon age |" in text
-    # an older engine's beacon has no handoffs_open/drift: unknown, shown as —
-    assert rows[0].split(" | ")[1:] == ["phase of Repo Name", "ok 2026-08-22T01:00:00 quick run", "2026-08-21", "1", "—", "—", "0d |"]
-    assert rows[1].split(" | ")[4:] == ["3", "2", "0", "2d |"]
+    assert "| Open partner tasks | Open handoffs | Drift | Backup | Beacon age |" in text
+    # an older engine's beacon has no handoffs_open/drift/backup fields: unknown, shown as —
+    assert rows[0].split(" | ")[1:] == ["phase of Repo Name", "ok 2026-08-22T01:00:00 quick run", "2026-08-21", "1", "—", "—", "—", "0d |"]
+    assert rows[1].split(" | ")[4:] == ["3", "2", "0", "12d ⚠", "2d |"]
+    assert rows[2].split(" | ")[7:] == ["3d", "14d |"]
     assert "- **Repo Name (this):** thread of Repo Name" in lines and "- **Older:** thread of Older" in lines
     assert "- **Ghost:**" not in text
     assert "## Dormant" in lines and "- Sleeper — /x/sleeper" in lines
@@ -1250,3 +1253,221 @@ def test_hostile_yaml_never_costs_the_good_handoffs(env, tmp_path):
     assert res.returncode == 1 and "unreadable frontmatter (yaml: ValueError)" in res.stderr and "Traceback" not in res.stderr
     assert run_cli(ctx, "handoff", "done", good.stem).returncode == 0
     assert memctl.inbox(ctx) == []
+
+
+# ---------------------------------------------------------------- unslept sessions
+def user_turn(ts, text="a real question", meta=False):
+    rec = {"type": "user", "timestamp": ts, "message": {"role": "user", "content": text}}
+    return {**rec, "isMeta": True} if meta else rec
+
+
+def add_lines(path: Path, rows, mtime=None):
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("".join(json.dumps(r) + "\n" for r in rows))
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+
+
+def epoch(iso: str) -> float:
+    return memctl._parse_ts(iso).timestamp()
+
+
+def test_unslept_detects_sessions_without_a_fresh_episode(env):
+    ctx = env  # sid-aaaa: two genuine turns, last 2026-08-01T10:02:00Z, no episode cites it
+    # (the window is widened to 30 days: TODAY is 2026-08-23)
+    jsonl(ctx.transcripts / "sid-triv.jsonl", [
+        user_turn("2026-08-02T09:00:00Z", "/wake"),
+        user_turn("2026-08-02T09:00:01Z", "skill text", meta=True),
+        {"type": "user", "timestamp": "2026-08-02T09:00:02Z", "message": {"content": [{"type": "tool_result", "content": "x"}]}}])
+    (ctx.transcripts / "sid-bad.jsonl").write_text("{not json\n" + json.dumps(user_turn("2026-08-03T09:00:00Z")) + "\n")
+    memctl.cmd_ingest(ctx, quiet=True)  # raw copies too: one entry per sid
+    assert memctl.unslept_sessions(ctx, days=30) == [
+        {"sid": "sid-aaaa", "last_turn": "2026-08-01T10:02:00Z", "reason": "no session note"}]
+    assert memctl.unslept_sessions(ctx, exclude_sid="sid-aaaa", days=30) == []
+    # an episode citing the sid, written after the last turn -> slept
+    episode = ctx.vault / "sessions" / "2026-08-01-work.md"
+    note(episode, {"type": "episode", "name": "work", "sources": ["raw:sid-aaaa#L3-L9"]})
+    os.utime(episode, (epoch("2026-08-01T12:00:00Z"),) * 2)
+    assert memctl.unslept_sessions(ctx, days=30) == []
+    # the app touches the transcript later with metadata and tool results only -> still slept
+    src = ctx.transcripts / "sid-aaaa.jsonl"
+    add_lines(src, [{"type": "ai-title", "aiTitle": "y"}, user_turn("2026-08-02T08:00:00Z", "meta", meta=True),
+                    {"type": "user", "timestamp": "2026-08-02T08:00:01Z", "message": {"content": [{"type": "tool_result", "content": "z"}]}}])
+    assert memctl.unslept_sessions(ctx, days=30) == []
+    # the session resumed after its episode was written -> unslept again
+    add_lines(src, [user_turn("2026-08-02T09:30:00Z", [{"type": "text", "text": "one more thing"}])])
+    assert memctl.unslept_sessions(ctx, days=30) == [
+        {"sid": "sid-aaaa", "last_turn": "2026-08-02T09:30:00Z", "reason": "turns after its session note"}]
+    # a transcript untouched for longer than the window is out of scope
+    old = epoch("2026-07-01T00:00:00Z")
+    for p in (src, ctx.raw / "sid-aaaa.jsonl"):
+        os.utime(p, (old, old))
+    assert memctl.unslept_sessions(ctx, days=30) == []
+
+
+def test_wakepack_lists_unslept_sessions_capped(env):
+    ctx = env
+    jsonl(ctx.transcripts / "sid-aaaa.jsonl", [user_turn("2026-08-09T11:00:00Z"), user_turn("2026-08-09T12:00:00Z")])
+    memctl.cmd_ingest(ctx, quiet=True)
+    text = memctl.cmd_wakepack(ctx, ingest_missing=False, do_print=False)
+    top = text.split("\n\n")[0].splitlines()
+    unslept = [l for l in top if l.startswith("UNSLEPT: ")]
+    when = memctl._local_minute("2026-08-09T12:00:00Z")
+    assert unslept == [f"UNSLEPT: sid-aaaa (last turn {when}, no session note)"]
+    for i in range(4):
+        jsonl(ctx.transcripts / f"sid-{i}xxxxxx.jsonl", [user_turn(f"2026-08-1{i}T09:00:00Z"), user_turn(f"2026-08-1{i}T10:00:00Z")])
+    line = next(l for l in memctl.build_wakepack(ctx).splitlines() if l.startswith("UNSLEPT: "))
+    assert line.startswith("UNSLEPT: sid-3xxx (") and line.endswith("; +2 more") and line.count("last turn") == 3
+    res = run_cli(ctx, "unslept", "--print", "--exclude-sid", "sid-3xxxxxx")
+    assert res.returncode == 0
+    assert res.stdout.splitlines()[0] == "unslept: 4 session(s) in the last 14 days"
+    assert [l.split()[0] for l in res.stdout.splitlines()[1:]] == ["sid-2xxxxxx", "sid-1xxxxxx", "sid-0xxxxxx", "sid-aaaa"]
+    for sid in ("sid-aaaa", "sid-0xxxxxx", "sid-1xxxxxx", "sid-2xxxxxx", "sid-3xxxxxx"):
+        note(ctx.vault / "checkins" / f"{sid}.md", {"type": "episode", "sources": [f"pending:{sid}"]})
+    assert "UNSLEPT" not in memctl.build_wakepack(ctx)
+    assert run_cli(ctx, "unslept").stdout == "unslept: none\n"
+
+
+def test_unslept_failure_never_blocks_the_wake(env, monkeypatch):
+    ctx = env
+    monkeypatch.setattr(memctl, "unslept_sessions", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert memctl.build_wakepack(ctx).startswith("HEALTH: ")
+    assert "unslept: RuntimeError('boom')" in memctl.read_jsonl(ctx.index / "hook-errors.jsonl")[-1]["error"]
+
+
+# ---------------------------------------------------------------- backup visibility
+def snapshot(folder: Path, name: str, size: int, day: str) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(b"x" * size)
+    stamp = dt.datetime.fromisoformat(day + "T12:00:00").timestamp()  # local noon
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_backup_status_states_and_wake_line(env):
+    ctx = env
+    version(ctx, name="Acme HQ")
+    dest = Path(os.environ["CLEO_BACKUP_DIR"])
+    assert memctl.backup_status(ctx) == {"newest": None, "age_days": None, "state": "unreachable"}
+    assert memctl.cmd_beacon(ctx)["backup_state"] == "unreachable"
+    assert f"BACKUP: unreachable — {dest} does not exist" in memctl.build_wakepack(ctx).splitlines()
+    dest.mkdir()
+    assert memctl.backup_status(ctx)["state"] == "none"
+    sub = dest / "acme-hq"
+    snapshot(sub, "vault-2026-08-22_1200.tar.gz", 45, "2026-08-22")  # the old bug's empty archive
+    snapshot(sub, "vault-2026-08-21_1200.tar.gz", 0, "2026-08-21")
+    snapshot(dest / "other", "vault-2026-08-22_1200.tar.gz", 4096, "2026-08-22")  # another instance's
+    assert memctl.backup_status(ctx)["state"] == "none"
+    assert {k: memctl.cmd_beacon(ctx)[k] for k in ("backup_age_days", "backup_state")} == {"backup_age_days": None, "backup_state": "none"}
+    assert any(l.startswith("BACKUP: none — no acme-hq snapshot") for l in memctl.build_wakepack(ctx).splitlines())
+    snapshot(sub, "vault-2026-08-10_1200.tar.gz", 4096, "2026-08-10")
+    assert memctl.backup_status(ctx) == {"newest": "2026-08-10T12:00:00", "age_days": 13, "state": "stale"}
+    assert "BACKUP: STALE — newest acme-hq snapshot 13 days old (2026-08-10)" in memctl.build_wakepack(ctx).splitlines()
+    assert {k: memctl.cmd_beacon(ctx)[k] for k in ("backup_age_days", "backup_state")} == {"backup_age_days": 13, "backup_state": "stale"}
+    snapshot(sub, "vault-2026-08-13_1200.tar.gz", 4096, "2026-08-13")
+    assert memctl.backup_status(ctx) == {"newest": "2026-08-13T12:00:00", "age_days": 10, "state": "ok"}
+    assert "BACKUP" not in memctl.build_wakepack(ctx)
+    assert {k: memctl.cmd_beacon(ctx)[k] for k in ("backup_age_days", "backup_state")} == {"backup_age_days": 10, "backup_state": "ok"}
+
+
+def test_backup_slug_mirrors_the_script(env):
+    ctx = env
+    assert memctl.backup_dir(ctx)[1] == "repo"  # no VERSION: the folder name
+    version(ctx, name="  Cleo_HQ (main)! ")
+    assert memctl.backup_dir(ctx)[1] == "cleo-hq-main"
+
+
+@pytest.mark.parametrize("fields, cell", [
+    ({"backup_age_days": 3, "backup_state": "ok"}, "3d"),
+    ({"backup_age_days": 12, "backup_state": "stale"}, "12d ⚠"),
+    ({"backup_age_days": None, "backup_state": "none"}, "none ⚠"),
+    ({"backup_age_days": None, "backup_state": "unreachable"}, "unreachable"),
+    ({"backup_age_days": None, "backup_state": None}, "—"),  # the check failed
+    ({}, "—"),  # an older engine's beacon
+])
+def test_portfolio_backup_column_tells_the_states_apart(env, fields, cell):
+    ctx = env
+    beacon_file("Spoke", "/x/spoke", TODAY + "T00:00:00", **fields)
+    [row] = [l for l in memctl.cmd_portfolio(ctx).splitlines() if l.startswith("| Spoke |")]
+    assert row.split(" | ")[7] == cell
+
+
+SID = "9eb1ca13-f5e6-444f-9970-542762ed1152"
+
+
+def two_turn_session(ctx, sid, first="2026-08-20T09:00:00Z", last="2026-08-20T10:00:00Z", mtime=None):
+    path = ctx.transcripts / f"{sid}.jsonl"
+    jsonl(path, [user_turn(first), user_turn(last)])
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_unslept_window_follows_the_last_turn_not_the_mtime(env):
+    ctx = env
+    two_turn_session(ctx, SID, "2026-07-01T09:00:00Z", "2026-07-01T10:00:00Z")  # old turns, mtime touched today
+    assert SID not in [r["sid"] for r in memctl.unslept_sessions(ctx)]
+
+
+def test_unslept_fresh_raw_copy_cannot_readmit_an_old_transcript(env):
+    ctx = env
+    two_turn_session(ctx, SID, mtime=epoch("2026-07-01T00:00:00Z"))  # outside the mtime window
+    memctl.cmd_ingest(ctx, quiet=True)  # the raw copy is written now: a fresh mtime
+    os.utime(ctx.transcripts / f"{SID}.jsonl", (epoch("2026-07-01T00:00:00Z"),) * 2)
+    assert (ctx.raw / f"{SID}.jsonl").exists()
+    assert SID not in [r["sid"] for r in memctl.unslept_sessions(ctx)]
+
+
+def test_unslept_ignores_user_records_the_partner_did_not_type(env):
+    ctx = env
+    rows = [user_turn("2026-08-20T09:00:00Z", "a real question")]
+    for i, text in enumerate(["<task-notification>done</task-notification>", "<local-command-stdout>ok</local-command-stdout>",
+                              "  <local-command-stderr>x</local-command-stderr>", "[Request interrupted by user]"]):
+        rows.append(user_turn(f"2026-08-20T09:0{i + 1}:00Z", [{"type": "text", "text": text}]))
+    rows.append({**user_turn("2026-08-20T09:10:00Z", "summary of the chat"), "isCompactSummary": True})
+    rows.append({**user_turn("2026-08-20T09:11:00Z", "subagent prompt"), "isSidechain": True})
+    jsonl(ctx.transcripts / f"{SID}.jsonl", rows)
+    assert memctl.genuine_user_turns(ctx.transcripts / f"{SID}.jsonl")[0] == 1
+    assert SID not in [r["sid"] for r in memctl.unslept_sessions(ctx)]
+
+
+def test_unslept_grace_for_a_goodbye_after_sleep(env):
+    ctx = env
+    src = two_turn_session(ctx, SID)
+    episode = ctx.vault / "sessions" / "2026-08-20-work.md"
+    note(episode, {"type": "episode", "sources": [f"raw:{SID[:8]}#L1-L9"]})
+    os.utime(episode, (epoch("2026-08-20T10:05:00Z"),) * 2)
+    add_lines(src, [user_turn("2026-08-20T10:30:00Z", "thanks, good night")])  # 25 min after: grace
+    assert SID not in [r["sid"] for r in memctl.unslept_sessions(ctx)]
+    add_lines(src, [user_turn("2026-08-20T10:40:00Z", "actually, one more task")])  # 35 min after
+    assert [r for r in memctl.unslept_sessions(ctx) if r["sid"] == SID] == [
+        {"sid": SID, "last_turn": "2026-08-20T10:40:00Z", "reason": "turns after its session note"}]
+
+
+@pytest.mark.parametrize("body, slept", [
+    (f"commit {SID[:8]} fixed the thing\n", False),  # a bare 8-char fragment is not a citation
+    (f"sources: pending:{SID[:8]}\n", True),
+    (f"see raw:{SID[:8]}#L4\n", True),
+    (f"session {SID}\n", True),
+])
+def test_unslept_requires_a_real_citation(env, body, slept):
+    ctx = env
+    two_turn_session(ctx, SID)
+    note(ctx.vault / "checkins" / "2026-08-20.md", {"type": "episode"}, body)
+    assert (SID not in [r["sid"] for r in memctl.unslept_sessions(ctx)]) is slept
+
+
+def test_unslept_skips_files_that_vanish_mid_scan(env):
+    ctx = env
+    (ctx.transcripts / "sid-gone.jsonl").symlink_to(ctx.transcripts / "missing.jsonl")
+    (ctx.vault / "sessions" / "gone.md").symlink_to(ctx.vault / "missing.md")
+    two_turn_session(ctx, SID)
+    assert [r["sid"] for r in memctl.unslept_sessions(ctx)] == [SID]
+
+
+def test_backup_slug_reads_the_first_unindented_name_line(env):
+    ctx = env
+    (ctx.root / ".cleo").mkdir()
+    (ctx.root / ".cleo" / "VERSION").write_text("  name: Indented\nname: First One\nname: Second\n")
+    assert memctl.backup_dir(ctx)[1] == "first-one"

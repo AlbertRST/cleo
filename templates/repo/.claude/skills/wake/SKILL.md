@@ -35,6 +35,13 @@ python3 .cleo/engine/memctl.py wakepack --ingest-missing --print
    A `DRIFT:` line under HEALTH means this instance's vendored machinery lags its seed (`+dirty`:
    the seed has uncommitted work — never refresh from it). Say so in the report; it is handled at
    `/sleep` (step 4b), not mid-wake.
+   An `UNSLEPT:` line names recent sessions that ended without `/sleep`: their judgement work was
+   never done. Before project work, run a **catch-up consolidation** for each: read that
+   transcript's tail, write its session note (episode) citing its sid, resolve its `pending:<sid>`
+   sources to transcript lines, fill its `situations.jsonl` `actual` — then re-run
+   `python3 .cleo/engine/memctl.py unslept` to confirm it cleared.
+   A `BACKUP:` line means the vault snapshot is stale, missing or unreachable: run
+   `bash .cleo/engine/backup_vault.sh` by hand, report the result, and investigate if it fails.
 1. `MISSION.md` (charter — what this project is for) and `MAP.md` (current state + router),
    plus the top 2–3 entries of `DECISIONS.md`.
 2. **Situation recall (additive).** Infer the situation from the calendar and the partner's
@@ -87,6 +94,7 @@ session by asking "what do you want to do?" — that is the manager's job to pro
 WAKE CHECKLIST
  ✓ 0 WAKE-PACK read — HEALTH: <ok|STALE|fail> · GOAL-STATE read · PORTFOLIO: <n spokes | not HQ>
      · INBOX: <n handoffs read | none> · DRIFT: <none | n files>
+     · UNSLEPT: <none | n caught up> · BACKUP: <ok | state>
  ✓ 1 MISSION · MAP · DECISIONS (top entries)
  ✓ 2 situation: <guess> · query run: "<terms>" · top bodies opened: <n>
  ✓ 3 backlog + commitments   ✓ 4 sessions/<newest or none>

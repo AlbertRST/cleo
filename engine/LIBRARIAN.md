@@ -122,6 +122,22 @@ so tests fake `HOME`): `spokes/<encoded-path>.json` beacons and `partner/*.md` s
   unreadable) and the portfolio shows it.
 - Tests: `test_memctl.py` 50 (26 + 24 new).
 
+## Unslept sessions, backup visibility (2026-10-30)
+- **Unslept.** `unslept_sessions(ctx, exclude_sid, days=14)`: transcripts (Claude Code's dir, then raw
+  copies; a stem seen in the first is never taken from the second) whose last genuine user turn falls
+  in the window (mtime is only a pre-filter), with >=2 genuine turns. Genuine = typed: not meta,
+  compact-summary or sidechain; text, not tool results or `<task-notification>` / `<local-command-*>` /
+  `[Request interrupted` (a `/wake` counts). Slept = an episode (`sessions/`, `checkins/`) cites
+  `raw:<sid8>`, `pending:<sid8>` or the full sid AND its mtime + `UNSLEPT_GRACE_MIN` (30) >= that last
+  turn (a goodbye after /sleep does not re-open it). Streams lines; bad lines and vanished files are
+  skipped. Wake pack: one `UNSLEPT:` line after DRIFT (3 listed, `+N more`); CLI `unslept [--print]
+  [--exclude-sid]`, exits 0.
+- **Backup.** `backup_dir` mirrors `backup_vault.sh` (`CLEO_BACKUP_DIR`, first unindented VERSION `name:`
+  slug, else folder name); `backup_status` -> ok | stale (>`BACKUP_STALE_DAYS`) | none (no `vault-*.tar.gz` >= 1 KB) |
+  unreachable (no DEST). Wake pack: a `BACKUP:` line only when not ok; beacon `backup_age_days` + `backup_state`;
+  portfolio `Backup` column (`3d`, `12d ⚠` stale, `none ⚠`, `unreachable`, `—` unknown/old engine). The script sweeps `.vault-*` temp files older
+  than a day (a SIGKILLed run's leftovers) before the gate.
+
 ## Open items / proposals for Cleo
 - Smoke test 2026-08-22 on the real vault: 84 catalog rows; `lint --quick` = 6 errors, all the same
   content issue — six session notes carry `sources: [raw:transcripts]`, which names no session. Fix

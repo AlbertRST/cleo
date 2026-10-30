@@ -14,13 +14,17 @@ older=0
 [ "${1:-}" = "--if-older-than" ] && older="${2:-7}"
 [ -d "$ROOT/private" ] || fail "no vault at $ROOT/private — nothing backed up"
 
-# Instance slug: the name: line of .cleo/VERSION, else the folder name; lowercase, non-alnum -> '-'.
+# Instance slug: the FIRST unindented name: line of .cleo/VERSION, else the folder name; lowercase,
+# non-alnum -> '-'. memctl.py's backup_dir mirrors this rule (the wake pack's BACKUP line): keep in sync.
+# ROOT comes from `pwd` (logical path); memctl uses the resolved root — they differ only under a symlink.
 slugify(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//'; }
 slug=$(slugify "$(sed -n 's/^name:[[:space:]]*//p' "$ROOT/.cleo/VERSION" 2>/dev/null | head -1)")
 [ -n "$slug" ] || slug=$(slugify "$(basename "$ROOT")")
 [ -n "$slug" ] || fail "cannot derive an instance name for $ROOT"
 SUB="$DEST/$slug"
 mkdir -p "$SUB" || fail "cannot create $SUB"
+# A SIGKILLed run cannot fire its EXIT trap: sweep temp files older than a day (never a live run's).
+find "$SUB" -maxdepth 1 -name '.vault-*' -mmin +1440 -delete
 
 # The age gate looks only at this instance's snapshots (legacy flat files in $DEST are ignored).
 if [ "$older" -gt 0 ]; then
