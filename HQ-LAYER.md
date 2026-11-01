@@ -56,12 +56,18 @@ therefore keeps beacons fresh without anyone thinking about it).
 `memctl portfolio` at HQ reads all beacons and renders `private/index/PORTFOLIO.md`: active
 spokes in a table (phase, health, last session, open partner tasks, open handoffs, drift, beacon
 age — `—` where an older spoke's beacon does not report a count), one last-thread
-line per spoke, the dormant list, and a stale list for beacons older than 14 days. HQ's wake
-ritual reads it right after GOAL-STATE. The map lives in HQ's **vault**, not its repo — it is
-derived state about other projects.
+line per spoke, the dormant list, and a stale list. HQ's wake ritual reads it right after
+GOAL-STATE. The map lives in HQ's **vault**, not its repo — it is derived state about other
+projects.
 
-A stale beacon is a signal, not an error: either the project has not been opened in two weeks,
-or its SessionEnd hook is broken. Cleo at HQ says which she thinks it is.
+A spoke is **stale** when its last real session (the beacon's `last_session`) is older than 14
+days, or when the beacon itself is — a refresh from the seed re-emits the beacon, so beacon age
+alone would read an idle spoke as fresh. A spoke never opened (`last_session` null) counts from
+its `installed` date; an older engine's beacon without `last_session` is judged by beacon age.
+The stale list shows both ages. Stale is a signal, not an error. An old session date means the
+project has not been opened in two weeks. An old beacon means its night/hook is not running or
+the project has not been opened — the beacon carries the session date, so HQ cannot tell which;
+Cleo at HQ says which she thinks it is.
 
 ## The shared partner model
 

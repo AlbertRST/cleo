@@ -60,9 +60,13 @@ so tests fake `HOME`): `spokes/<encoded-path>.json` beacons and `partner/*.md` s
   Failures go to `index/hook-errors.jsonl` and never fail night.
 - `portfolio [--print]` — `cmd_portfolio`: reads every beacon (unreadable ones are listed, not fatal) and
   renders `private/index/PORTFOLIO.md`: header counts, a table of active spokes sorted by `updated`
-  desc (`(this)` marks the current root), `## Last threads`, `## Dormant`, `## Stale beacons (>14 days)`.
-  A beacon older than `STALE_BEACON_DAYS` is *stale*, not active (a spoke whose night has not run in two
-  weeks is not really live). No beacons -> one line explaining how to enroll (`install-cleo.sh`).
+  desc (`(this)` marks the current root), `## Last threads`, `## Dormant`,
+  `## Stale (no session or no beacon for >14 days)`. `spoke_is_stale`: stale when `last_session` OR the
+  beacon `updated` is older than `STALE_SPOKE_DAYS` (a seed refresh re-emits the beacon of an idle spoke;
+  an old beacon means night/hook not running or project not opened — HQ cannot tell which). `last_session`
+  null (never opened) -> age from `installed`; key absent (older engine) -> beacon age alone; an
+  unparseable date (`2026-02-30`) -> unknown, never a crash. The stale list shows both ages. No beacons ->
+  one line explaining how to enroll (`install-cleo.sh`).
 - Wake pack: when `role: hq`, a `## PORTFOLIO` section follows GOAL-STATE. It is self-capped at
   `PORTFOLIO_PACK_CAP` (a third of `WAKE_PACK_CAP`) with a `(truncated — see private/index/PORTFOLIO.md)`
   line, *before* the general cap loop — that loop trims from the tail, and the portfolio must never
@@ -137,6 +141,38 @@ so tests fake `HOME`): `spokes/<encoded-path>.json` beacons and `partner/*.md` s
   unreachable (no DEST). Wake pack: a `BACKUP:` line only when not ok; beacon `backup_age_days` + `backup_state`;
   portfolio `Backup` column (`3d`, `12d ⚠` stale, `none ⚠`, `unreachable`, `—` unknown/old engine). The script sweeps `.vault-*` temp files older
   than a day (a SIGKILLed run's leftovers) before the gate.
+
+## Backup restore test (2026-10-31, hardened after review)
+- `backup verify [--snapshot PATH] [--print]` — `cmd_backup_verify`: extracts the newest snapshot
+  (`newest_snapshot`, same >= 1 KB rule as `backup_status`) or PATH into a fresh `tempfile.mkdtemp()` dir,
+  removed in `finally`; never touches the live vault. Any `VerifyFailed` or `OSError` is a logged FAIL.
+- Extraction: refused outright when `tarfile` has no `data_filter` ("python too old for safe extraction");
+  always `filter="data"` — that filter is what keeps writes inside the temp dir (a chain of in-archive
+  symlinks passes any lexical check). `unsafe_member` (absolute paths, `..`, links leaving the archive) is
+  only an early reject with a clearer reason.
+- Git is treated as hostile input: FAIL if `.git/commondir` or `.git/objects/info/alternates` exists
+  (they borrow objects from another repo — could be the live vault); the snapshot's `.git/config` is
+  replaced by a bare `[core]` before git runs (its own config could run commands: `core.fsmonitor`
+  fired during fsck). `snapshot_git` pins `GIT_DIR` / `GIT_WORK_TREE` / `GIT_CEILING_DIRECTORIES`, strips
+  inherited `GIT_*`, sets `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `HOME=<tmp>`,
+  `-c core.fsmonitor=false -c core.hooksPath=/dev/null`; `rev-parse --absolute-git-dir` must equal the
+  restored `.git` (no discovery into an enclosing repo). Then `fsck --no-progress` and `log -1` (commit
+  date). git missing -> both "skipped", not a failure.
+- Content: `GOAL-STATE.md` required; notes in `sessions/` + `memory/` compared with the live vault — FAIL
+  only when the snapshot has fewer than half the live count (so a live vault with none there, e.g. a
+  project that keeps its record in repo docs, passes).
+- One line — `backup verify: ok — <name>, <n> notes (live <m>), last vault commit <date>` or
+  `backup verify: FAIL — <reason>` — exit 0/1; appends `{ts, snapshot, result, reason, adhoc}` to
+  `index/backup-verify.jsonl`. `adhoc` = a `--snapshot` outside this instance's backup folder; such rows
+  never count as this instance's test.
+- `verify_history` (non-object rows and ad-hoc rows skipped; the last row is the newest test) feeds
+  `backup_status`: `last_verified` (newest `ok` date), `last_verify_result`, `last_verify_ts`,
+  `last_verify_reason`. The snapshot state is computed first; an unreadable log is logged to
+  hook-errors and costs only the history. Wake pack, when the snapshot state is ok: newest test failed ->
+  `BACKUP: last restore test FAILED <date> — <reason>`; else no pass in `BACKUP_VERIFY_DAYS` (30) ->
+  `BACKUP: never restore-tested` / `BACKUP: last restore test N days ago`. A stale/none/unreachable
+  snapshot line outranks all of these; one line total.
+- On demand only — not in `night` or any hook (cadence is Cleo's call).
 
 ## Open items / proposals for Cleo
 - Smoke test 2026-08-22 on the real vault: 84 catalog rows; `lint --quick` = 6 errors, all the same

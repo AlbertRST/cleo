@@ -534,11 +534,40 @@ def test_portfolio_render_sort_stale_and_empty(env):
     assert "- **Repo Name (this):** thread of Repo Name" in lines and "- **Older:** thread of Older" in lines
     assert "- **Ghost:**" not in text
     assert "## Dormant" in lines and "- Sleeper — /x/sleeper" in lines
-    assert "## Stale beacons (>14 days)" in lines and "- Ghost — /x/ghost (15d)" in lines
+    assert "## Stale (no session or no beacon for >14 days)" in lines
+    assert "- Ghost — /x/ghost (last session 2d, beacon 15d)" in lines
     assert "## Unreadable beacons" in lines and "- broken.json (JSONDecodeError)" in lines
     assert (ctx.index / "PORTFOLIO.md").read_text() == text
     res = run_cli(ctx, "portfolio", "--print")
     assert res.returncode == 0 and res.stdout == text
+
+
+def test_portfolio_stale_follows_the_last_session_not_the_beacon(env):
+    ctx = env
+    fresh = TODAY + "T01:00:00"
+    beacon_file("Refreshed", "/x/refreshed", fresh, last_session="2026-06-27")  # re-emitted by a seed refresh, idle 57 days
+    beacon_file("Busy", "/x/busy", fresh, last_session="2026-08-22")
+    beacon_file("Silent", "/x/silent", "2026-07-01T00:00:00", last_session="2026-06-30")  # night/hook not running, or not opened
+    for name, path, updated in (("Old Engine", "/x/old", "2026-08-01T00:00:00"), ("Old Recent", "/x/old-recent", fresh)):
+        dest = beacon_file(name, path, updated)  # an older engine's beacon: no last_session, beacon age decides
+        data = json.loads(dest.read_text())
+        del data["last_session"]
+        dest.write_text(json.dumps(data))
+    beacon_file("Never Opened", "/x/never", fresh, last_session=None, installed="2026-08-01")  # kept fresh by refreshes
+    beacon_file("New Install", "/x/new", fresh, last_session=None, installed="2026-08-20")
+    beacon_file("Bad Session", "/x/bad-session", fresh, last_session="2026-02-30")  # not a date: beacon age decides
+    beacon_file("Bad Updated", "/x/bad-updated", "2026-02-30T00:00:00")  # cannot cost the whole portfolio
+    beacon_file("Idle Sleeper", "/x/sleeper", fresh, status="dormant", last_session="2026-01-01")
+    lines = memctl.cmd_portfolio(ctx).splitlines()
+    assert lines[0] == "# PORTFOLIO — 4 active · 1 dormant · 5 stale"
+    rows = [l.split(" | ")[0][2:] for l in lines if l.startswith("| ") and not l.startswith("| Name")]
+    assert sorted(rows) == ["Bad Session", "Busy", "New Install", "Old Recent"]
+    assert "- Refreshed — /x/refreshed (last session 57d, beacon 0d)" in lines
+    assert "- Silent — /x/silent (last session 54d, beacon 53d)" in lines
+    assert "- Old Engine — /x/old (last session unknown, beacon 22d)" in lines
+    assert "- Never Opened — /x/never (last session never, installed 22d ago, beacon 0d)" in lines
+    assert "- Bad Updated — /x/bad-updated (last session 2d, beacon unknown)" in lines
+    assert "- Idle Sleeper — /x/sleeper" in lines
 
 
 def test_wakepack_portfolio_only_for_hq_and_capped(env):
@@ -1349,7 +1378,8 @@ def test_backup_status_states_and_wake_line(env):
     ctx = env
     version(ctx, name="Acme HQ")
     dest = Path(os.environ["CLEO_BACKUP_DIR"])
-    assert memctl.backup_status(ctx) == {"newest": None, "age_days": None, "state": "unreachable"}
+    assert memctl.backup_status(ctx) == {"newest": None, "age_days": None, "state": "unreachable", "last_verified": None,
+            "last_verify_result": None, "last_verify_ts": None, "last_verify_reason": None}
     assert memctl.cmd_beacon(ctx)["backup_state"] == "unreachable"
     assert f"BACKUP: unreachable — {dest} does not exist" in memctl.build_wakepack(ctx).splitlines()
     dest.mkdir()
@@ -1362,11 +1392,17 @@ def test_backup_status_states_and_wake_line(env):
     assert {k: memctl.cmd_beacon(ctx)[k] for k in ("backup_age_days", "backup_state")} == {"backup_age_days": None, "backup_state": "none"}
     assert any(l.startswith("BACKUP: none — no acme-hq snapshot") for l in memctl.build_wakepack(ctx).splitlines())
     snapshot(sub, "vault-2026-08-10_1200.tar.gz", 4096, "2026-08-10")
-    assert memctl.backup_status(ctx) == {"newest": "2026-08-10T12:00:00", "age_days": 13, "state": "stale"}
-    assert "BACKUP: STALE — newest acme-hq snapshot 13 days old (2026-08-10)" in memctl.build_wakepack(ctx).splitlines()
+    assert memctl.backup_status(ctx) == {"newest": "2026-08-10T12:00:00", "age_days": 13, "state": "stale", "last_verified": None,
+            "last_verify_result": None, "last_verify_ts": None, "last_verify_reason": None}
+    pack = memctl.build_wakepack(ctx).splitlines()
+    assert "BACKUP: STALE — newest acme-hq snapshot 13 days old (2026-08-10)" in pack  # outranks "never restore-tested"
+    assert len([l for l in pack if l.startswith("BACKUP:")]) == 1
     assert {k: memctl.cmd_beacon(ctx)[k] for k in ("backup_age_days", "backup_state")} == {"backup_age_days": 13, "backup_state": "stale"}
     snapshot(sub, "vault-2026-08-13_1200.tar.gz", 4096, "2026-08-13")
-    assert memctl.backup_status(ctx) == {"newest": "2026-08-13T12:00:00", "age_days": 10, "state": "ok"}
+    assert memctl.backup_status(ctx) == {"newest": "2026-08-13T12:00:00", "age_days": 10, "state": "ok", "last_verified": None,
+            "last_verify_result": None, "last_verify_ts": None, "last_verify_reason": None}
+    assert "BACKUP: never restore-tested" in memctl.build_wakepack(ctx).splitlines()
+    memctl.append_jsonl(ctx.index / "backup-verify.jsonl", {"ts": "2026-08-20T09:00:00", "result": "ok"})
     assert "BACKUP" not in memctl.build_wakepack(ctx)
     assert {k: memctl.cmd_beacon(ctx)[k] for k in ("backup_age_days", "backup_state")} == {"backup_age_days": 10, "backup_state": "ok"}
 
@@ -1471,3 +1507,273 @@ def test_backup_slug_reads_the_first_unindented_name_line(env):
     (ctx.root / ".cleo").mkdir()
     (ctx.root / ".cleo" / "VERSION").write_text("  name: Indented\nname: First One\nname: Second\n")
     assert memctl.backup_dir(ctx)[1] == "first-one"
+
+
+# ---------------------------------------------------------------- backup restore test
+def vault_snapshot(tmp_path: Path, out: Path, git: bool = True, memory_notes: int = 3, setup=None) -> Path:
+    """A tiny synthetic vault, tarred exactly as backup_vault.sh does (`tar -C ROOT -czf OUT private`).
+    `setup(priv)` runs after the commit, before the tar (to plant hostile git state)."""
+    src = tmp_path / f"snapsrc-{out.stem}"
+    priv = src / "private"
+    priv.mkdir(parents=True)
+    (priv / "GOAL-STATE.md").write_text("---\ntype: goal-state\n---\n## Phase now\nrecovery\n")
+    (priv / "memory").mkdir()
+    for i in range(memory_notes):
+        note(priv / "memory" / f"fact-{i}.md", {"name": f"fact-{i}", "type": "fact"})
+    if memory_notes:
+        note(priv / "sessions" / "2026-08-22-work.md", {"type": "episode"})
+    if git:
+        stamp = {"GIT_AUTHOR_DATE": "2026-08-22T10:00:00", "GIT_COMMITTER_DATE": "2026-08-22T10:00:00"}
+        subprocess.run(["git", "init", "-q", str(priv)], check=True)
+        subprocess.run(["git", "-C", str(priv), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(priv), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "snap"],
+                       check=True, env={**os.environ, **stamp})
+    if setup:
+        setup(priv)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["tar", "-C", str(src), "-czf", str(out), "private"], check=True)
+    return out
+
+
+@pytest.fixture
+def verify_env(env, tmp_path, monkeypatch):
+    """A versioned instance plus a private temp root (in-process and for CLI runs), so every restore
+    dir can be seen and counted."""
+    version(env, name="Acme HQ")
+    scratch = tmp_path / "tmpdirs"
+    scratch.mkdir()
+    monkeypatch.setattr(memctl.tempfile, "tempdir", str(scratch))
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    return env, Path(os.environ["CLEO_BACKUP_DIR"]) / "acme-hq", scratch
+
+
+def verify_rows(ctx):
+    return memctl.read_jsonl(ctx.index / "backup-verify.jsonl")
+
+
+def test_backup_verify_ok_logs_and_clears_the_wake_line(verify_env, tmp_path, capsys):
+    ctx, sub, scratch = verify_env
+    vault_snapshot(tmp_path, sub / "vault-2026-08-22_1200.tar.gz")
+    assert "BACKUP: never restore-tested" in memctl.build_wakepack(ctx).splitlines()
+    assert memctl.cmd_backup_verify(ctx) is True
+    live = len(memctl.vault_md_files(ctx.vault))
+    assert capsys.readouterr().out == (f"backup verify: ok — vault-2026-08-22_1200.tar.gz, 5 notes (live {live}), "
+                                       "last vault commit 2026-08-22\n")
+    assert list(scratch.iterdir()) == []  # the restore dir is gone
+    assert verify_rows(ctx) == [{"ts": TODAY + "T01:00:00", "snapshot": str(sub / "vault-2026-08-22_1200.tar.gz"),
+                                 "result": "ok", "reason": None, "adhoc": False}]
+    assert memctl.backup_status(ctx)["last_verified"] == TODAY
+    assert "BACKUP" not in memctl.build_wakepack(ctx)
+    # a passing test older than BACKUP_VERIFY_DAYS is flagged again
+    (ctx.index / "backup-verify.jsonl").write_text(json.dumps({"ts": "2026-07-01T09:00:00", "result": "ok"}) + "\n")
+    assert "BACKUP: last restore test 53 days ago" in memctl.build_wakepack(ctx).splitlines()
+
+
+def test_backup_wake_line_reports_a_failed_newest_restore_test(verify_env, tmp_path):
+    ctx, sub, _ = verify_env
+    good = vault_snapshot(tmp_path, sub / "vault-2026-08-22_1200.tar.gz")
+    no_git = vault_snapshot(tmp_path, sub / "vault-nogit.tar.gz", git=False)  # < 1 KB: never the newest
+    assert memctl.cmd_backup_verify(ctx) is True
+    assert memctl.cmd_backup_verify(ctx, str(no_git)) is False  # ok, then fail: the failure shows
+    status = memctl.backup_status(ctx)
+    assert (status["last_verified"], status["last_verify_result"]) == (TODAY, "fail")
+    assert status["last_verify_reason"] == "snapshot has no private/.git"
+    pack = memctl.build_wakepack(ctx).splitlines()
+    assert f"BACKUP: last restore test FAILED {TODAY} — snapshot has no private/.git" in pack
+    assert len([l for l in pack if l.startswith("BACKUP:")]) == 1
+    assert memctl.cmd_backup_verify(ctx, str(good)) is True  # fail, then ok: cleared
+    assert memctl.backup_status(ctx)["last_verify_result"] == "ok"
+    assert "BACKUP" not in memctl.build_wakepack(ctx)
+    assert memctl.cmd_backup_verify(ctx, str(no_git)) is False
+    os.utime(good, (epoch("2026-08-01T12:00:00Z"),) * 2)  # a stale snapshot still outranks the failed test
+    pack = [l for l in memctl.build_wakepack(ctx).splitlines() if l.startswith("BACKUP:")]
+    assert len(pack) == 1 and pack[0].startswith("BACKUP: STALE")
+
+
+def test_backup_verify_failures_and_cli(verify_env, tmp_path, capsys, monkeypatch):
+    ctx, sub, scratch = verify_env
+    assert memctl.cmd_backup_verify(ctx) is False  # nothing to test yet
+    assert capsys.readouterr().out.startswith(f"backup verify: FAIL — no snapshot in {sub}")
+    good = vault_snapshot(tmp_path, sub / "vault-2026-08-22_1200.tar.gz")
+    broken = sub / "vault-2026-08-23_0100.tar.gz"
+    broken.write_bytes(good.read_bytes()[: good.stat().st_size // 2])  # truncated: the newest, and corrupt
+    assert memctl.cmd_backup_verify(ctx) is False
+    assert capsys.readouterr().out.startswith("backup verify: FAIL — cannot read the archive")
+    with monkeypatch.context() as m:
+        m.setattr(memctl, "newest_snapshot", lambda c: (_ for _ in ()).throw(PermissionError("denied")))
+        assert memctl.cmd_backup_verify(ctx) is False  # an OSError is a logged FAIL, not a traceback
+    assert capsys.readouterr().out == "backup verify: FAIL — PermissionError: denied\n"
+    assert list(scratch.iterdir()) == []
+    rows = verify_rows(ctx)
+    assert [r["result"] for r in rows] == ["fail"] * 3 and rows[1]["snapshot"] == str(broken)
+    assert memctl.backup_status(ctx)["last_verified"] is None
+    res = run_cli(ctx, "backup", "verify", "--snapshot", str(good), "--print")
+    assert res.returncode == 0 and res.stdout.startswith("backup verify: ok — vault-2026-08-22_1200.tar.gz, 5 notes")
+    assert f"  snapshot: {good}" in res.stdout.splitlines()
+    res = run_cli(ctx, "backup", "verify")
+    assert res.returncode == 1 and res.stdout.startswith("backup verify: FAIL — cannot read the archive")
+    assert list(scratch.iterdir()) == []  # the CLI's restore dirs too
+
+
+def test_backup_verify_adhoc_snapshot_is_not_this_instances_test(verify_env, tmp_path):
+    ctx, sub, _ = verify_env
+    vault_snapshot(tmp_path, sub / "vault-2026-08-22_1200.tar.gz")
+    elsewhere = vault_snapshot(tmp_path, tmp_path / "elsewhere" / "vault-elsewhere.tar.gz")
+    assert memctl.cmd_backup_verify(ctx, str(elsewhere)) is True
+    assert verify_rows(ctx)[-1]["adhoc"] is True
+    assert memctl.backup_status(ctx)["last_verified"] is None
+    assert "BACKUP: never restore-tested" in memctl.build_wakepack(ctx).splitlines()
+
+
+def test_backup_verify_log_garbage_never_hides_the_snapshot_state(verify_env, tmp_path):
+    ctx, sub, _ = verify_env
+    snap = vault_snapshot(tmp_path, sub / "vault-2026-08-10_1200.tar.gz")
+    os.utime(snap, (epoch("2026-08-10T12:00:00Z"),) * 2)
+    (ctx.index).mkdir(parents=True, exist_ok=True)
+    (ctx.index / "backup-verify.jsonl").write_text('null\n[]\n"x"\n{"ts": "2026-08-22T09:00:00", "result": "ok"}\n7\n')
+    status = memctl.backup_status(ctx)
+    assert status["state"] == "stale" and status["last_verified"] == "2026-08-22" and status["last_verify_result"] == "ok"
+    assert any(l.startswith("BACKUP: STALE") for l in memctl.build_wakepack(ctx).splitlines())
+    (ctx.index / "backup-verify.jsonl").write_bytes(b"\xff\xfe not utf-8\n")  # unreadable: history lost, state kept
+    assert memctl.backup_status(ctx)["state"] == "stale"
+    assert any(l.startswith("BACKUP: STALE") for l in memctl.build_wakepack(ctx).splitlines())
+    assert "backup verify log" in memctl.read_jsonl(ctx.index / "hook-errors.jsonl")[-1]["error"]
+
+
+@pytest.mark.parametrize("member, link, reason", [
+    ("private/../../evil.txt", None, "unsafe path 'private/../../evil.txt'"),
+    ("/tmp/evil.txt", None, "unsafe path '/tmp/evil.txt'"),
+    ("private/out", "../../evil.txt", "link 'private/out' points outside the archive"),
+    ("private/abs", "/etc/passwd", "link 'private/abs' points outside the archive"),
+])
+def test_backup_verify_rejects_members_that_escape(verify_env, tmp_path, capsys, member, link, reason):
+    import io
+    import tarfile
+    ctx, sub, scratch = verify_env
+    bad = tmp_path / "hostile.tar.gz"
+    with tarfile.open(bad, "w:gz") as tar:
+        top = tarfile.TarInfo("private"); top.type = tarfile.DIRTYPE
+        tar.addfile(top)
+        info = tarfile.TarInfo(member)
+        if link:
+            info.type, info.linkname = tarfile.SYMTYPE, link
+            tar.addfile(info)
+        else:
+            info.size = 4
+            tar.addfile(info, io.BytesIO(b"evil"))
+    assert memctl.cmd_backup_verify(ctx, str(bad)) is False
+    assert capsys.readouterr().out == f"backup verify: FAIL — {reason}\n"
+    assert list(scratch.iterdir()) == [] and not (tmp_path / "evil.txt").exists()
+
+
+def symlink_chain_archive(path: Path) -> Path:
+    """private/a -> .., private/a/b -> .., then private/a/b/ESCAPED: each name passes a lexical check."""
+    import io
+    import tarfile
+    with tarfile.open(path, "w:gz") as tar:
+        top = tarfile.TarInfo("private"); top.type = tarfile.DIRTYPE
+        tar.addfile(top)
+        for name in ("private/a", "private/a/b"):
+            info = tarfile.TarInfo(name); info.type, info.linkname = tarfile.SYMTYPE, ".."
+            tar.addfile(info)
+        f = tarfile.TarInfo("private/a/b/ESCAPED"); f.size = 1
+        tar.addfile(f, io.BytesIO(b"x"))
+    return path
+
+
+def test_backup_verify_symlink_chain_is_stopped_by_the_data_filter(verify_env, tmp_path, capsys):
+    ctx, _, scratch = verify_env
+    chain = symlink_chain_archive(tmp_path / "chain.tar.gz")
+    assert memctl.cmd_backup_verify(ctx, str(chain)) is False
+    assert capsys.readouterr().out.startswith("backup verify: FAIL — unsafe archive member")
+    assert not list(tmp_path.rglob("ESCAPED")) and list(scratch.iterdir()) == []
+
+
+def test_backup_verify_refuses_to_extract_without_the_data_filter(verify_env, tmp_path, monkeypatch, capsys):
+    ctx, _, _ = verify_env
+    chain = symlink_chain_archive(tmp_path / "chain.tar.gz")
+    monkeypatch.delattr(memctl.tarfile, "data_filter")
+    assert memctl.cmd_backup_verify(ctx, str(chain)) is False
+    assert capsys.readouterr().out.startswith("backup verify: FAIL — python too old for safe extraction")
+    assert not list(tmp_path.rglob("ESCAPED"))
+
+
+def plant_fsmonitor(marker: Path):
+    def setup(priv: Path) -> None:
+        subprocess.run(["git", "-C", str(priv), "config", "core.fsmonitor", f"touch {marker}; false"], check=True)
+    return setup
+
+
+def plant_commondir(other: Path):
+    def setup(priv: Path) -> None:
+        import shutil
+        git = priv / ".git"
+        shutil.rmtree(git / "objects"); shutil.rmtree(git / "refs"); (git / "refs").mkdir()
+        (git / "commondir").write_text(f"{other / 'private' / '.git'}\n")
+    return setup
+
+
+def plant_alternates(other: Path):
+    def setup(priv: Path) -> None:
+        import shutil
+        for d in (priv / ".git" / "objects").glob("??"):
+            shutil.rmtree(d)
+        (priv / ".git" / "objects" / "info" / "alternates").write_text(f"{other / 'private' / '.git' / 'objects'}\n")
+    return setup
+
+
+def test_backup_verify_snapshot_git_state_cannot_run_or_redirect_git(verify_env, tmp_path, capsys):
+    ctx, sub, scratch = verify_env
+    marker = tmp_path / "PWNED"
+    hostile = vault_snapshot(tmp_path, sub / "vault-2026-08-22_1200.tar.gz", setup=plant_fsmonitor(marker))
+    assert memctl.cmd_backup_verify(ctx, str(hostile)) is True  # its config is replaced before git runs
+    assert not marker.exists()
+    capsys.readouterr()
+    other = tmp_path / "snapsrc-other.tar"
+    vault_snapshot(tmp_path, tmp_path / "other.tar.gz")  # a healthy repo at tmp_path/snapsrc-other.tar/private
+    for name, setup, reason in (("commondir", plant_commondir(other), "private/.git/commondir points git at another repository"),
+                                ("alternates", plant_alternates(other),
+                                 "private/.git/objects/info/alternates points git at another repository")):
+        snap = vault_snapshot(tmp_path, sub / f"vault-{name}.tar.gz", setup=setup)
+        assert memctl.cmd_backup_verify(ctx, str(snap)) is False
+        assert capsys.readouterr().out == f"backup verify: FAIL — {reason}\n"
+    assert list(scratch.iterdir()) == []
+
+
+def test_backup_verify_never_discovers_an_enclosing_repo(verify_env, tmp_path, monkeypatch, capsys):
+    ctx, sub, _ = verify_env
+    host = tmp_path / "host"
+    subprocess.run(["git", "init", "-q", str(host)], check=True)
+    subprocess.run(["git", "-C", str(host), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                    "-m", "h"], check=True)
+    (host / "tmpdirs").mkdir()
+    monkeypatch.setattr(memctl.tempfile, "tempdir", str(host / "tmpdirs"))  # restore dirs inside a healthy repo
+
+    def empty_git(priv: Path) -> None:
+        import shutil
+        shutil.rmtree(priv / ".git"); (priv / ".git").mkdir()
+    snap = vault_snapshot(tmp_path, sub / "vault-emptygit.tar.gz", setup=empty_git)
+    assert memctl.cmd_backup_verify(ctx, str(snap)) is False
+    assert capsys.readouterr().out == "backup verify: FAIL — private/.git is not a git repository of its own\n"
+    assert list((host / "tmpdirs").iterdir()) == []
+
+
+def test_backup_verify_compares_notes_with_the_live_vault(verify_env, tmp_path, capsys):
+    ctx, sub, _ = verify_env
+    thin = vault_snapshot(tmp_path, sub / "vault-thin.tar.gz", memory_notes=1)  # 2 notes vs live 5: under half
+    assert memctl.cmd_backup_verify(ctx, str(thin)) is False
+    assert capsys.readouterr().out == "backup verify: FAIL — snapshot has 2 notes in sessions/ + memory/, the live vault 5\n"
+    import shutil
+    for d in ("memory", "sessions"):  # a project that keeps its record in repo docs: none live, none backed up
+        shutil.rmtree(ctx.vault / d)
+    empty = vault_snapshot(tmp_path, sub / "vault-empty.tar.gz", memory_notes=0)
+    assert memctl.cmd_backup_verify(ctx, str(empty)) is True
+    assert capsys.readouterr().out.startswith("backup verify: ok — vault-empty.tar.gz, 1 notes (live ")
+
+
+def test_backup_verify_without_git_skips_the_git_checks(verify_env, tmp_path, monkeypatch, capsys):
+    ctx, sub, _ = verify_env
+    vault_snapshot(tmp_path, sub / "vault-2026-08-22_1200.tar.gz")
+    monkeypatch.setattr(memctl.shutil, "which", lambda name: None)
+    assert memctl.cmd_backup_verify(ctx) is True
+    assert capsys.readouterr().out.endswith("last vault commit unknown (git not found: fsck and log skipped)\n")

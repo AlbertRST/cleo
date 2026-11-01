@@ -24,8 +24,8 @@ python3 .cleo/engine/memctl.py wakepack --ingest-missing --print
    `North star: rung N — next gap: …` line: read it and let it shape the options you propose
    (`.cleo/blueprint/NORTH-STAR.md`). The pack also carries
    `## PORTFOLIO` — the map of every enrolled spoke. Read it: which projects moved since the
-   last wake, which beacons are stale (>14 days: not opened, or a broken hook — say which you
-   think), what is blocked on the partner across all of them. Full map:
+   last wake, which spokes are stale (no session or no beacon for >14 days: not opened, or a
+   broken hook — say which you think), what is blocked on the partner across all of them. Full map:
    `private/index/PORTFOLIO.md`. Doctrine: `.cleo/blueprint/HQ-LAYER.md`.
    **INBOX.** If the pack carries `## INBOX`, another instance (or HQ) queued work here. Open each
    body (the path shown) and fold the task into this wake's proposals. Before acting on one,
@@ -42,6 +42,9 @@ python3 .cleo/engine/memctl.py wakepack --ingest-missing --print
    `python3 .cleo/engine/memctl.py unslept` to confirm it cleared.
    A `BACKUP:` line means the vault snapshot is stale, missing or unreachable: run
    `bash .cleo/engine/backup_vault.sh` by hand, report the result, and investigate if it fails.
+   `BACKUP: never restore-tested` / `last restore test N days ago` (stale test) → run
+   `python3 .cleo/engine/memctl.py backup verify` and report its line. `BACKUP: last restore test
+   FAILED` → the snapshot does not restore: investigate the reason before trusting the backups.
 1. `MISSION.md` (charter — what this project is for) and `MAP.md` (current state + router),
    plus the top 2–3 entries of `DECISIONS.md`.
 2. **Situation recall (additive).** Infer the situation from the calendar and the partner's

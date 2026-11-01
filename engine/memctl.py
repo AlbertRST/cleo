@@ -4,7 +4,7 @@
 Single-file CLI. Python 3.12, stdlib + PyYAML. See subprojects/memory/README.md.
 
 Subcommands: ingest, catalog, query, cues, lint, audit, incidents, wakepack, unslept, night,
-health, beacon, portfolio, relocate, partner, drift, handoff (hub-and-spoke layer).
+health, beacon, portfolio, relocate, partner, drift, handoff (hub-and-spoke layer), backup verify.
 """
 from __future__ import annotations
 
@@ -16,13 +16,17 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import random
 import re
 import shlex
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+import tarfile
+import tempfile
+import zlib
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -73,7 +77,7 @@ DECISION_RE = re.compile(r"^## (D\d+)\b(.*)$")
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 GENERIC_STEMS = {"SKILL", "README", "index"}
 # hub-and-spoke: beacons on the home-level bus, portfolio rendered by the hq instance
-STALE_BEACON_DAYS = 14
+STALE_SPOKE_DAYS = 14  # stale: no session (or no beacon at all) for longer than this
 BEACON_TAIL_BYTES = 65536
 PORTFOLIO_PACK_CAP = WAKE_PACK_CAP // 3
 PORTFOLIO_TRUNC_LINE = "(truncated — see private/index/PORTFOLIO.md)"
@@ -125,6 +129,8 @@ NOT_TYPED_PREFIXES = ("<task-notification>", "<local-command-stdout>", "<local-c
 BACKUP_DEFAULT_DIR = "/mnt/c/CleoBackups/vault"
 BACKUP_STALE_DAYS = 10
 BACKUP_MIN_BYTES = 1024  # smaller is not a snapshot: the old bug wrote 45-byte empty archives
+BACKUP_VERIFY_DAYS = 30  # a restore test older than this is flagged at wake
+BACKUP_VERIFY_LOG = "backup-verify.jsonl"
 
 
 # --------------------------------------------------------------------------- helpers
@@ -1144,33 +1150,189 @@ def backup_dir(ctx: Ctx) -> tuple[Path, str]:
     return dest, name or SLUG_RE.sub("-", ctx.root.name.lower()).strip("-")
 
 
-def backup_status(ctx: Ctx) -> dict:
-    """Newest real vault snapshot of this instance: state ok | stale | none | unreachable."""
+def newest_snapshot(ctx: Ctx) -> Path | None:
+    """This instance's newest real vault snapshot (>= BACKUP_MIN_BYTES), by mtime."""
     dest, name = backup_dir(ctx)
-    if not dest.is_dir():
-        return {"newest": None, "age_days": None, "state": "unreachable"}
     sub = dest / name
-    stamps = [st.st_mtime for p in (sub.glob("vault-*.tar.gz") if sub.is_dir() else [])
-              if (st := p.stat()).st_size >= BACKUP_MIN_BYTES]
-    if not stamps:
-        return {"newest": None, "age_days": None, "state": "none"}
-    newest = dt.datetime.fromtimestamp(max(stamps)).replace(microsecond=0)
-    age = max(0, (today() - newest.date()).days)
-    return {"newest": newest.isoformat(), "age_days": age, "state": "stale" if age > BACKUP_STALE_DAYS else "ok"}
+    snaps = [(st.st_mtime, p) for p in (sub.glob("vault-*.tar.gz") if sub.is_dir() else [])
+             if (st := p.stat()).st_size >= BACKUP_MIN_BYTES]
+    return max(snaps)[1] if snaps else None
+
+
+def verify_history(ctx: Ctx) -> dict:
+    """This instance's restore tests in index/backup-verify.jsonl (ad-hoc `--snapshot` runs and
+    non-object rows ignored). The log is append-only: its last row is the newest test."""
+    rows = [r for r in read_jsonl(ctx.index / BACKUP_VERIFY_LOG) if isinstance(r, dict) and not r.get("adhoc")]
+    passed = [str(r.get("ts")) for r in rows if r.get("result") == "ok"]
+    last = rows[-1] if rows else {}
+    return {"last_verified": max(passed)[:10] if passed else None, "last_verify_result": last.get("result"),
+            "last_verify_ts": last.get("ts"), "last_verify_reason": last.get("reason")}
+
+
+def backup_status(ctx: Ctx) -> dict:
+    """Newest real vault snapshot of this instance: state ok | stale | none | unreachable, plus its
+    restore-test history (see verify_history). An unreadable log costs the history, never the state."""
+    dest, _ = backup_dir(ctx)
+    if not dest.is_dir():
+        status = {"newest": None, "age_days": None, "state": "unreachable"}
+    elif (snap := newest_snapshot(ctx)) is None:
+        status = {"newest": None, "age_days": None, "state": "none"}
+    else:
+        newest = dt.datetime.fromtimestamp(snap.stat().st_mtime).replace(microsecond=0)
+        age = max(0, (today() - newest.date()).days)
+        status = {"newest": newest.isoformat(), "age_days": age, "state": "stale" if age > BACKUP_STALE_DAYS else "ok"}
+    try:
+        history = verify_history(ctx)
+    except Exception as exc:
+        _log_hook_error(ctx, "backup verify log", exc)
+        history = {k: None for k in ("last_verified", "last_verify_result", "last_verify_ts", "last_verify_reason")}
+    return {**status, **history}
 
 
 def backup_line(ctx: Ctx) -> str | None:
-    """The wake-pack line: silent while the newest snapshot is fresh."""
+    """The wake-pack line: silent while the newest snapshot is fresh and restore-tested recently.
+    One line at most: a bad snapshot state outranks a failed restore test, which outranks an old one."""
     status = backup_status(ctx)
     dest, name = backup_dir(ctx)
     if status["state"] == "ok":
-        return None
+        if status["last_verify_result"] == "fail":
+            reason = " ".join(str(status["last_verify_reason"] or "no reason recorded").split())
+            return f"BACKUP: last restore test FAILED {str(status['last_verify_ts'])[:10]} — {reason}"
+        verified = parse_date(status["last_verified"])
+        if verified is None:
+            return "BACKUP: never restore-tested"
+        days = max(0, (today() - verified).days)
+        return f"BACKUP: last restore test {days} days ago" if days > BACKUP_VERIFY_DAYS else None
     if status["state"] == "stale":
         return (f"BACKUP: STALE — newest {name} snapshot {status['age_days']} days old "
                 f"({status['newest'][:10]})")
     if status["state"] == "none":
         return f"BACKUP: none — no {name} snapshot of at least {BACKUP_MIN_BYTES} bytes in {dest / name}"
     return f"BACKUP: unreachable — {dest} does not exist"
+
+
+class VerifyFailed(Exception):
+    """A restore test found the snapshot unusable; the message is the reason."""
+
+
+def unsafe_member(member: tarfile.TarInfo) -> str | None:
+    """Early, lexical reject of a member that names a path outside the target dir (None = looks safe).
+    Not sufficient alone (a chain of in-archive symlinks passes it): extraction always runs with the
+    `data` filter, which is what actually keeps every write inside the target dir."""
+    name = member.name
+    if name.startswith("/") or ".." in PurePosixPath(name).parts:
+        return f"unsafe path {name!r}"
+    if member.issym() or member.islnk():
+        base = posixpath.dirname(name) if member.issym() else ""  # hard links are archive-relative
+        target = posixpath.normpath(posixpath.join(base, member.linkname))
+        if member.linkname.startswith("/") or target == ".." or target.startswith("../"):
+            return f"link {name!r} points outside the archive"
+    return None
+
+
+def snapshot_git(vault: Path, tmp: Path, *args: str) -> subprocess.CompletedProcess:
+    """git pinned to the restored repo and nothing else: GIT_DIR / GIT_WORK_TREE set explicitly (no
+    discovery, no inherited GIT_*), no system or user config (HOME is the temp dir), no fsmonitor or
+    hooks. The snapshot's own .git/config is replaced before this runs (verify_snapshot)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_DIR=str(vault / ".git"), GIT_WORK_TREE=str(vault), GIT_CEILING_DIRECTORIES=str(tmp),
+               GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, HOME=str(tmp))
+    cmd = ["git", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}", *args]
+    try:
+        return subprocess.run(cmd, cwd=vault, capture_output=True, text=True, errors="replace", timeout=300, env=env)
+    except subprocess.TimeoutExpired as exc:
+        raise VerifyFailed(f"git {args[0]} timed out") from exc
+
+
+def verify_snapshot(snapshot: Path, tmp: Path, live_core: int) -> dict:
+    """Restore `snapshot` into the empty dir `tmp` and check it is a usable vault; raises VerifyFailed.
+    `live_core` = the live vault's note count in sessions/ + memory/ (the snapshot must keep >= half)."""
+    if not hasattr(tarfile, "data_filter"):
+        raise VerifyFailed("python too old for safe extraction (tarfile has no data filter)")
+    try:
+        with tarfile.open(snapshot, "r:gz") as tar:
+            members = tar.getmembers()
+            if not any(m.name.rstrip("/") == "private" or m.name.startswith("private/") for m in members):
+                raise VerifyFailed("archive has no private/")
+            for m in members:
+                if (why := unsafe_member(m)):
+                    raise VerifyFailed(why)
+            tar.extractall(tmp, filter="data")
+    except tarfile.FilterError as exc:
+        raise VerifyFailed(f"unsafe archive member ({exc.__class__.__name__}: {exc})") from exc
+    except (tarfile.TarError, OSError, EOFError, zlib.error) as exc:
+        raise VerifyFailed(f"cannot read the archive ({exc.__class__.__name__}: {exc})") from exc
+    vault = tmp / "private"
+    git_dir = vault / ".git"
+    if not git_dir.is_dir():
+        raise VerifyFailed("snapshot has no private/.git")
+    for redirect in ("commondir", "objects/info/alternates"):  # would borrow objects from another repo
+        if (git_dir / redirect).exists() or (git_dir / redirect).is_symlink():
+            raise VerifyFailed(f"private/.git/{redirect} points git at another repository")
+    config = git_dir / "config"
+    config.unlink(missing_ok=True)  # the snapshot's config could run commands (core.fsmonitor, ...)
+    config.write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    if shutil.which("git") is None:
+        commit = "unknown (git not found: fsck and log skipped)"
+    else:
+        where = snapshot_git(vault, tmp, "rev-parse", "--absolute-git-dir")
+        if where.returncode or Path(where.stdout.strip()).resolve() != git_dir.resolve():
+            raise VerifyFailed("private/.git is not a git repository of its own")
+        fsck = snapshot_git(vault, tmp, "fsck", "--no-progress")
+        if fsck.returncode:
+            first = next(iter((fsck.stderr or fsck.stdout).strip().splitlines()), f"exit {fsck.returncode}")
+            raise VerifyFailed(f"git fsck failed: {first}")
+        log = snapshot_git(vault, tmp, "log", "-1", "--format=%cs")
+        if log.returncode or not log.stdout.strip():
+            raise VerifyFailed("private/.git has no commit")
+        commit = log.stdout.strip()
+    if not (vault / "GOAL-STATE.md").is_file():
+        raise VerifyFailed("snapshot has no GOAL-STATE.md")
+    core = core_note_count(vault)
+    if live_core and core * 2 < live_core:
+        raise VerifyFailed(f"snapshot has {core} notes in sessions/ + memory/, the live vault {live_core}")
+    return {"notes": len(vault_md_files(vault)), "commit": commit}
+
+
+def core_note_count(vault: Path) -> int:
+    """Markdown notes in sessions/ + memory/ — a project that keeps its record in repo docs has none."""
+    return sum(1 for d in ("sessions", "memory") for p in (vault / d).rglob("*.md") if p.is_file())
+
+
+def cmd_backup_verify(ctx: Ctx, snapshot: str | None = None, do_print: bool = False) -> bool:
+    """Restore test: extract a snapshot (default: the newest) into a fresh temp dir — never near the
+    live vault, always removed — check it, print one line and log it to index/backup-verify.jsonl.
+    A --snapshot outside this instance's backup folder is logged `adhoc` and never counts as its test."""
+    dest, name = backup_dir(ctx)
+    snap: Path | None = None
+    tmp: Path | None = None
+    try:
+        snap = Path(snapshot).expanduser().resolve() if snapshot else newest_snapshot(ctx)
+        if snap is None:
+            raise VerifyFailed(f"no snapshot in {dest / name}")
+        if not snap.is_file():
+            raise VerifyFailed(f"{snap} is not a file")
+        tmp = Path(tempfile.mkdtemp(prefix="cleo-backup-verify-")).resolve()
+        live_ok = ctx.vault.is_dir()
+        found = verify_snapshot(snap, tmp, core_note_count(ctx.vault) if live_ok else 0)
+        live = len(vault_md_files(ctx.vault)) if live_ok else 0
+        line = (f"backup verify: ok — {snap.name}, {found['notes']} notes (live {live}), "
+                f"last vault commit {found['commit']}")
+        reason = None
+    except (VerifyFailed, OSError, RuntimeError) as exc:  # RuntimeError: expanduser on ~nouser
+        reason = str(exc) if isinstance(exc, VerifyFailed) else f"{exc.__class__.__name__}: {exc}"
+        line = f"backup verify: FAIL — {reason}"
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+    adhoc = bool(snapshot) and (snap is None or snap.resolve().parent != (dest / name).resolve())
+    append_jsonl(ctx.index / BACKUP_VERIFY_LOG, {"ts": now_iso(), "snapshot": str(snap) if snap else None,
+                                                 "result": "fail" if reason else "ok", "reason": reason, "adhoc": adhoc})
+    print(line)
+    if do_print:
+        print(f"  snapshot: {snap or '—'}{' (ad hoc: outside this instance backup folder)' if adhoc else ''}\n"
+              f"  log: {ctx.index / BACKUP_VERIFY_LOG}")
+    return reason is None
 
 
 def build_wakepack(ctx: Ctx, exclude_sid: str | None = None) -> str:
@@ -1441,9 +1603,45 @@ def load_beacons() -> tuple[list[dict], list[str]]:
     return beacons, bad
 
 
+def days_since(value, ref: dt.date) -> int | None:
+    """Whole days from a beacon date field to ref; None when absent or not a real date (2026-02-30)."""
+    try:
+        day = parse_date(value)
+    except ValueError:
+        return None
+    return None if day is None else max(0, (ref - day).days)
+
+
 def beacon_age_days(beacon: dict, ref: dt.date) -> int | None:
-    upd = parse_date(beacon.get("updated"))
-    return None if upd is None else max(0, (ref - upd).days)
+    return days_since(beacon.get("updated"), ref)
+
+
+def session_age_days(beacon: dict, ref: dt.date) -> int | None:
+    """Days since the spoke's last real session. A spoke never opened (last_session null) counts from
+    its `installed` date. None when the beacon carries no last_session (an older engine)."""
+    if "last_session" not in beacon:
+        return None
+    last = beacon["last_session"]
+    return days_since(beacon.get("installed") if last is None else last, ref)
+
+
+def spoke_is_stale(beacon_age: int | None, session_age: int | None) -> bool:
+    """A refresh from the seed re-emits the beacon, so beacon age alone cannot tell an idle spoke:
+    stale when the last session is old, or when the beacon itself is (its night/hook is not running,
+    or the project is not opened; HQ cannot tell which).
+    An older engine's beacon has no last_session: its beacon age is all there is."""
+    if beacon_age is None or beacon_age > STALE_SPOKE_DAYS:
+        return True
+    return (beacon_age if session_age is None else session_age) > STALE_SPOKE_DAYS
+
+
+def stale_entry(beacon: dict, age: int | None, ref: dt.date) -> str:
+    """'last session 20d, beacon 0d' — both ages, so HQ can see why the spoke is stale."""
+    sess = session_age_days(beacon, ref)
+    sess_txt = "unknown" if sess is None else f"{sess}d"
+    if "last_session" in beacon and beacon["last_session"] is None:
+        sess_txt = "never" + ("" if sess is None else f", installed {sess}d ago")
+    return f"last session {sess_txt}, beacon {'unknown' if age is None else f'{age}d'}"
 
 
 def backup_cell(beacon: dict) -> str:
@@ -1463,7 +1661,7 @@ def render_portfolio(ctx: Ctx, beacons: list[dict], bad: list[str]) -> str:
         age = beacon_age_days(b, ref)
         if b.get("status") == "dormant":
             dormant.append((b, age))
-        elif age is None or age > STALE_BEACON_DAYS:
+        elif spoke_is_stale(age, session_age_days(b, ref)):
             stale.append((b, age))
         else:
             active.append((b, age))
@@ -1493,9 +1691,8 @@ def render_portfolio(ctx: Ctx, beacons: list[dict], bad: list[str]) -> str:
         if dormant:
             lines += ["", "## Dormant"] + [f"- {name_of(b)} — {b.get('path') or '?'}" for b, _ in dormant]
         if stale:
-            lines += ["", f"## Stale beacons (>{STALE_BEACON_DAYS} days)"]
-            lines += [f"- {name_of(b)} — {b.get('path') or '?'} ({'unknown age' if age is None else f'{age}d'})"
-                      for b, age in stale]
+            lines += ["", f"## Stale (no session or no beacon for >{STALE_SPOKE_DAYS} days)"]
+            lines += [f"- {name_of(b)} — {b.get('path') or '?'} ({stale_entry(b, age, ref)})" for b, age in stale]
     if bad:
         lines += ["", "## Unreadable beacons"] + [f"- {name}" for name in bad]
     return "\n".join(lines) + "\n"
@@ -2095,6 +2292,11 @@ def main(argv: list[str] | None = None) -> int:
     hlist.add_argument("--print", action="store_true", help="also list the items")
     hdone = hs.add_parser("done"); hdone.add_argument("id"); hdone.add_argument("--note")
     hdone.add_argument("--force", action="store_true", help="close a handoff not addressed to this instance")
+    bk = sub.add_parser("backup", help="vault snapshot tools")
+    bks = bk.add_subparsers(dest="action", required=True)
+    bkv = bks.add_parser("verify", help="restore-test a snapshot into a temp dir (default: the newest)")
+    bkv.add_argument("--snapshot", help="a vault-*.tar.gz to test instead of the newest")
+    bkv.add_argument("--print", action="store_true", help="also show the snapshot path and the log")
     args = ap.parse_args(argv)
 
     root = Path(args.root).resolve() if args.root else find_repo_root()
@@ -2147,6 +2349,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "list":
             cmd_handoff_list(ctx, args.all, args.print); return 0
         print(f"handoff: closed -> {cmd_handoff_done(ctx, args.id, args.note, args.force)}"); return 0
+    if args.cmd == "backup":
+        return 0 if cmd_backup_verify(ctx, args.snapshot, args.print) else 1
     return 2
 
 
